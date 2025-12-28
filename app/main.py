@@ -3186,6 +3186,17 @@ async def generar_preguntas(unidad_id: int, request: Request):
 
 
 
+def parse_json_field(value, default):
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+    return default
 
 #################################################################
 ##################
@@ -3419,21 +3430,44 @@ async def crear_guion(
 
     # -------------------- Construir respuesta FINAL --------------------
     respuesta_final = {
-        "identificacion_clase": data_response.get("identificacion_clase", {}),
-        "resultado_aprendizaje": ra,                 # input (igual lo puedes devolver)
-        "contenido_tematico": contenido,             # input
-        "analisis_ra": data_response.get("analisis_ra", {}),
-        "secuencia_actividades": data_response.get("secuencia_actividades", {}),
-        "estrategias_didacticas": data_response.get("estrategias_didacticas", []),
-        "evaluaciones_formativas": data_response.get("evaluaciones_formativas", []),
-        "bibliografia_material": data_response.get("bibliografia_material", []),
-        "metadata": data_response.get("metadata", {}),
-        "thread_id": data_response.get("thread_id", thread_id),
+    "identificacion_clase": parse_json_field(
+        data_response.get("identificacion_clase"), {}
+    ),
 
-        "nombre_unidad": nombre_unidad,
-        "nombre_curso": nombre_curso,
-        "nombre_profesor": nombre_profesor
+    "resultado_aprendizaje": ra,
+    "contenido_tematico": contenido,
+
+    "analisis_ra": parse_json_field(
+        data_response.get("analisis_ra"), {}
+    ),
+
+    "secuencia_actividades": parse_json_field(
+        data_response.get("secuencia_actividades"), {}
+    ),
+
+    "estrategias_didacticas": parse_json_field(
+        data_response.get("estrategias_didacticas"), []
+    ),
+
+    "evaluaciones_formativas": parse_json_field(
+        data_response.get("evaluaciones_formativas"), []
+    ),
+
+    "bibliografia_material": parse_json_field(
+        data_response.get("bibliografia_material"), []
+    ),
+
+    "metadata": parse_json_field(
+        data_response.get("metadata"), {}
+    ),
+
+    "thread_id": data_response.get("thread_id", thread_id),
+
+    "nombre_unidad": nombre_unidad,
+    "nombre_curso": nombre_curso,
+    "nombre_profesor": nombre_profesor
     }
+
 
 
     return JSONResponse(status_code=201, content={
@@ -3491,21 +3525,22 @@ async def obtener_planificacion_guion(guion_id: int):
 
         # Reconstruir estructura (igual a la respuesta nueva de tu /crear_guion)
         result = {
-            "identificacion_clase": json.loads(planificacion.get("identificacion_clase") or "{}"),
+            "identificacion_clase": parse_json_field(planificacion.get("identificacion_clase"), {}),
             "resultado_aprendizaje": planificacion.get("resultado_aprendizaje", ""),
             "contenido_tematico": planificacion.get("contenido_tematico", ""),
-            "analisis_ra": json.loads(planificacion.get("analisis_ra") or "{}"),
-            "secuencia_actividades": json.loads(planificacion.get("secuencia_actividades") or "{}"),
-            "estrategias_didacticas": json.loads(planificacion.get("estrategias_didacticas") or "[]"),
-            "evaluaciones_formativas": json.loads(planificacion.get("evaluaciones_formativas") or "[]"),
-            "bibliografia_material": json.loads(planificacion.get("bibliografia_material") or "[]"),
-            "metadata": json.loads(planificacion.get("metadata") or "{}"),
+            "analisis_ra": parse_json_field(planificacion.get("analisis_ra"), {}),
+            "secuencia_actividades": parse_json_field(planificacion.get("secuencia_actividades"), {}),
+            "estrategias_didacticas": parse_json_field(planificacion.get("estrategias_didacticas"), []),
+            "evaluaciones_formativas": parse_json_field(planificacion.get("evaluaciones_formativas"), []),
+            "bibliografia_material": parse_json_field(planificacion.get("bibliografia_material"), []),
+            "metadata": parse_json_field(planificacion.get("metadata"), {}),
             "thread_id": planificacion.get("thread_id", ""),
 
             "nombre_unidad": planificacion.get("nombre_unidad", ""),
             "nombre_curso": planificacion.get("nombre_curso", ""),
-            "nombre_profesor": planificacion.get("nombre_profesor", "")
+            "nombre_profesor": planificacion.get("nombre_profesor", ""),
         }
+
 
         return result
 
@@ -3546,99 +3581,107 @@ async def obtener_planificaciones_unidad(unidad_id: int):
 ##################
 #########################################################################
 
+
 def eliminar_guion(id_guion: int):
-    """Elimina un guión y todos sus recursos asociados en OpenAI"""
-    
+    """
+    Elimina un guión y todos sus recursos asociados en OpenAI
+    (assistant, vector store, file) y luego borra el registro en DB.
+    """
+
+    conn = None
+    cursor = None
+
     try:
-        # Primero obtener los IDs de los recursos antes de eliminar el registro
-        conn = mysql.connector.connect(**db_config)
+        # 1️⃣ Obtener IDs de recursos desde PostgreSQL
+        conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # Obtener los IDs de los recursos asociados al guión
         cursor.execute("""
-            SELECT assistant_id, vector_id, file_id 
-            FROM guion_clase 
+            SELECT assistant_id, vector_id, file_id
+            FROM guion_clase
             WHERE id = %s
         """, (id_guion,))
-        
+
         guion = cursor.fetchone()
-        
+
         if not guion:
-            print(f"❌ Guión con ID {id_guion} no encontrado")
             return {"error": "Guión no encontrado"}
-        
-        assistant_id = guion['assistant_id']
-        vector_id = guion['vector_id']
-        file_id = guion['file_id']
-        
-        # Cerrar conexión antes de eliminar recursos externos
+
+        assistant_id = guion.get("assistant_id")
+        vector_id = guion.get("vector_id")
+        file_id = guion.get("file_id")
+
         cursor.close()
         conn.close()
-        
-        # Eliminar recursos de OpenAI (si existen)
+        cursor = None
+        conn = None
+
         recursos_eliminados = []
-        
-        # 1. Eliminar asistente
-        if assistant_id and assistant_id.strip():
+
+        def _safe_id(x):
+            return isinstance(x, str) and x.strip()
+
+        # 2️⃣ Eliminar assistant
+        if _safe_id(assistant_id):
             try:
                 client.beta.assistants.delete(assistant_id)
-                print(f"🗑️ Assistant {assistant_id} eliminado")
                 recursos_eliminados.append(f"assistant_{assistant_id}")
             except Exception as e:
                 if "not found" not in str(e).lower():
                     print(f"⚠️ Error eliminando assistant {assistant_id}: {e}")
-        
-        # 2. Eliminar vector store
-        if vector_id and vector_id.strip():
+
+        # 3️⃣ Eliminar vector store
+        if _safe_id(vector_id):
             try:
                 client.beta.vector_stores.delete(vector_id)
-                print(f"🗑️ Vector store {vector_id} eliminado")
                 recursos_eliminados.append(f"vector_{vector_id}")
             except Exception as e:
                 if "not found" not in str(e).lower():
-                    print(f"⚠️ Error eliminando vector store {vector_id}: {e}")
-        
-        # 3. Eliminar archivo
-        if file_id and file_id.strip():
+                    print(f"⚠️ Error eliminando vector {vector_id}: {e}")
+
+        # 4️⃣ Eliminar archivo
+        if _safe_id(file_id):
             try:
                 client.files.delete(file_id)
-                print(f"🗑️ File {file_id} eliminado")
                 recursos_eliminados.append(f"file_{file_id}")
             except Exception as e:
                 if "not found" not in str(e).lower():
                     print(f"⚠️ Error eliminando file {file_id}: {e}")
-        
-        # Ahora eliminar el registro de la base de datos
-        conn = mysql.connector.connect(**db_config)
+
+        # 5️⃣ Eliminar guión de la BD
+        conn = connect_db()
         cursor = conn.cursor()
-        
+
         cursor.execute("DELETE FROM guion_clase WHERE id = %s", (id_guion,))
         conn.commit()
-        
-        cursor.close()
-        conn.close()
-        
-        print(f"✅ Guión {id_guion} eliminado exitosamente")
-        print(f"📦 Recursos eliminados: {len(recursos_eliminados)}")
-        
+
         return {
-            "message": f"Guión {id_guion} eliminado exitosamente",
+            "message": f"Guión {id_guion} eliminado correctamente",
             "recursos_eliminados": recursos_eliminados,
             "recursos_count": len(recursos_eliminados)
         }
-        
+
     except Exception as e:
         print(f"❌ Error eliminando guión {id_guion}: {e}")
         return {"error": f"Error eliminando guión: {str(e)}"}
 
-# Versión para FastAPI endpoint
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
+
 @app.delete("/guion/{id_guion}")
 async def eliminar_guion_endpoint(id_guion: int):
-    """Endpoint para eliminar un guión y sus recursos"""
+    # Si quieres que no bloquee el event loop, luego lo pasamos a threadpool.
     return eliminar_guion(id_guion)
-
-
 from fastapi.responses import StreamingResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
