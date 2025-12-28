@@ -3,7 +3,10 @@
 # =========================
 from pathlib import Path
 from dotenv import load_dotenv
+import resend  # pip install resend
 
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"   # -> backend/.env
 load_dotenv(ENV_PATH)
 
@@ -5597,11 +5600,11 @@ async def generar_infografia(
         # OJO: tu helper actual NO soporta timeout_total real (lo pisa).
         # Igual lo llamamos con tipo_contenido="infografia" y abajo te dejo cómo arreglar el helper.
         data_response = await llamar_fn_con_reintentos_infografia(
-    call_fn,
-    data,
-    max_intentos=2,
-    timeout_total=350
-)
+            call_fn,
+            data,
+            max_intentos=2,
+            timeout_total=350
+        )
 
 
         if not data_response or not data_response.get("imagen_base64"):
@@ -5872,86 +5875,90 @@ async def llamar_fn_con_reintentos_infografia(
 #########################################################################
 
 
+def _build_zip_bytes(archivos: list[UploadFile]) -> bytes:
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for archivo in archivos:
+            nombre_seguro = (archivo.filename or "archivo").replace(" ", "_").replace("/", "_")
+            # OJO: archivo.read() es async, esto es helper sync → leemos afuera en endpoint
+            # Aquí solo dejamos estructura, lo haremos bien en endpoint.
+    return b""
+
+
 @app.post("/enviar-correo")
 async def enviar_correo_con_archivos(
     destinatarios: str = Form(...),
     asunto: str = Form(...),
     mensaje: str = Form(...),
-    remitente: str = Form(...),
+    remitente: str = Form(...),  # lo recibes pero no se usa para autenticación
     archivos: list[UploadFile] = File(...)
 ):
     try:
-        print("📧 Iniciando envío de correo...")
-        
-        # Parsear destinatarios
-        lista_destinatarios = json.loads(destinatarios)
-        print(f"👥 Destinatarios: {lista_destinatarios}")
-        print(f"📝 Asunto: {asunto}")
-        print(f"📎 Archivos recibidos: {len(archivos)}")
+        if not RESEND_API_KEY:
+            raise HTTPException(status_code=500, detail="Falta RESEND_API_KEY en variables de entorno")
 
-        # ✅ CREAR ZIP EN MEMORIA
+        # Parsear destinatarios (vienen como string JSON)
+        try:
+            lista_destinatarios = json.loads(destinatarios)
+            if isinstance(lista_destinatarios, str):
+                lista_destinatarios = [lista_destinatarios]
+            if not isinstance(lista_destinatarios, list) or not lista_destinatarios:
+                raise ValueError("destinatarios debe ser una lista no vacía")
+        except Exception:
+            raise HTTPException(status_code=400, detail="destinatarios debe ser JSON de lista, ej: [\"a@b.com\"]")
+
+        # Crear ZIP en memoria
         zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             for archivo in archivos:
-                print(f"📦 Agregando al ZIP: {archivo.filename}")
-                
-                # Leer contenido del archivo
                 contenido = await archivo.read()
-                
-                # Usar nombre seguro para el ZIP (sin espacios raros)
-                nombre_seguro = archivo.filename.replace(' ', '_').replace('/', '_')
-                
-                # Agregar archivo al ZIP
+                nombre_seguro = (archivo.filename or "archivo").replace(" ", "_").replace("/", "_")
                 zipf.writestr(nombre_seguro, contenido)
 
-        # Obtener el contenido del ZIP
         zip_buffer.seek(0)
-        zip_content = zip_buffer.getvalue()
-        zip_buffer.close()
+        zip_bytes = zip_buffer.getvalue()
 
-        print(f"📊 Tamaño del ZIP: {len(zip_content) / (1024*1024):.2f} MB")
+        tam_mb = len(zip_bytes) / (1024 * 1024)
+        if tam_mb > 20:  # umbral típico para adjuntos; ajusta según tu proveedor
+            raise HTTPException(status_code=413, detail=f"ZIP demasiado grande ({tam_mb:.2f} MB). Reduce tamaño.")
 
-        # Crear mensaje
-        msg = MIMEMultipart()
-        msg['From'] = remitente
-        msg['To'] = ", ".join(lista_destinatarios)
-        msg['Subject'] = asunto
+        # Configurar Resend
+        resend.api_key = RESEND_API_KEY
 
-        # Agregar cuerpo del mensaje
-        msg.attach(MIMEText(mensaje, 'plain'))
+        # Resend requiere adjuntos en base64
+        import base64
+        zip_b64 = base64.b64encode(zip_bytes).decode("utf-8")
 
-        # ✅ AGREGAR SOLO EL ZIP COMO ADJUNTO (en lugar de todos los archivos)
-        part = MIMEBase('application', 'zip')
-        part.set_payload(zip_content)
-        encoders.encode_base64(part)
-        part.add_header(
-            'Content-Disposition',
-            f'attachment; filename="Materiales_Estudio.zip"'
-        )
-        msg.attach(part)
+        # Enviar email
+        # Nota: Resend usa "html" o "text". Usamos text.
+        resp = resend.Emails.send({
+            "from": EMAIL_FROM,
+            "to": lista_destinatarios,
+            "subject": asunto,
+            "text": mensaje,
+            "attachments": [
+                {
+                    "filename": "Materiales_Estudio.zip",
+                    "content": zip_b64,
+                }
+            ],
+        })
 
-        # Enviar correo
-        print("🚀 Enviando correo con ZIP...")
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_INSTITUCIONAL, EMAIL_PASSWORDI)
-        
-        text = msg.as_string()
-        server.sendmail(remitente, lista_destinatarios, text)
-        server.quit()
-
-        print("✅ Correo con ZIP enviado exitosamente")
-        return {
+        return JSONResponse({
             "status": "success",
-            "message": f"Correo enviado a {len(lista_destinatarios)} destinatarios con ZIP que contiene {len(archivos)} archivos",
+            "message": f"Correo enviado a {len(lista_destinatarios)} destinatarios con ZIP ({tam_mb:.2f} MB)",
             "destinatarios": len(lista_destinatarios),
             "archivos_en_zip": len(archivos),
-            "tamaño_zip_mb": f"{len(zip_content) / (1024*1024):.2f}"
-        }
+            "zip_mb": f"{tam_mb:.2f}",
+            "provider_response": resp,  # útil para debug
+        })
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"❌ Error enviando correo: {e}")
+        print(f"❌ Error enviando correo (Resend): {e}")
         raise HTTPException(status_code=500, detail=f"Error al enviar correo: {str(e)}")
+
 #################################################################
 #################################################################
 #################################################################
