@@ -117,10 +117,10 @@ logger = logging.getLogger(__name__)
 # =========================
 origins = [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:3000",
-    "https://whimsical-brigadeiros-eed9f9.netlify.app",
+    "https://tesisfinal.netlify.app",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -296,25 +296,32 @@ async def get_user_id(request: Request):
     return int(user_id)
 
 # Modifica tu login para que devuelva un token
+import os
+from fastapi.responses import JSONResponse
+
 @app.post("/login")
 async def user_login(body: LoginBody):
     user = login(body.correo, body.clave)
+
+    IS_PROD = os.getenv("ENV") == "prod"
 
     response = JSONResponse(content={"message": "Login exitoso", "user": user})
     response.set_cookie(
         key="user_id",
         value=str(user["id"]),
         httponly=True,
-        secure=False,   # True cuando sea HTTPS en producción
-        samesite="lax"
+        secure=IS_PROD,                 # True en Render
+        samesite="none" if IS_PROD else "lax",  # none en prod para Netlify -> Render
+        path="/",
+        max_age=60*60*24*7,             # opcional
     )
     return response
+
 @app.post("/logout")
-async def user_logout(response: Response):
-    # Elimina la cookie de user_id configurando su fecha de expiración en el pasado
-    response.delete_cookie(key="user_id")
-    
-    return JSONResponse(content={"message": "Sesión cerrada con éxito"}, status_code=200)
+async def user_logout():
+    response = JSONResponse(content={"message": "Sesión cerrada con éxito"})
+    response.delete_cookie(key="user_id", path="/")
+    return response
 
 # Ruta para obtener el ID del usuario de la cookie
 @app.get("/user_id")
