@@ -156,7 +156,7 @@ except Exception as e:
 # =========================
 # 10) Endpoints Drive (los mantengo)
 # =========================
-@app.post("/api/subir-drive")
+@app.post("/subir-drive")
 async def subir_a_drive(
     file: UploadFile = File(...),
     dias_expiracion: str = Form("7"),
