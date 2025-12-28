@@ -57,7 +57,6 @@ from googleapiclient.http import MediaIoBaseUpload
 # 2) Imports internos del proyecto
 # =========================
 from .gpt_api import *               # si lo usas aquí
-from .preguntas import *             # si lo usas aquí
 from .autenticacion import login
 from .services.google_drive_oauth import GoogleDriveOAuth
 from ..api import router as api_router
