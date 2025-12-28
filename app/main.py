@@ -3900,16 +3900,13 @@ async def cancelar_runs_activos_si_reintento(thread_id, intento_actual, max_inte
         except Exception as e:
             print(f"⚠️ Error cancelando runs: {e}")
 
-async def llamar_fn_con_reintentos_y_cancelacion(call_fn,
+async def llamar_fn_con_reintentos_y_cancelacion(
+    call_fn,
     data,
     max_intentos=3,
     tipo_contenido="glosario",
     timeout_total=None
 ):
-    """
-    Igual que llamar_api_con_reintentos_y_cancelacion, pero llama una función interna (call_fn)
-    en vez de hacer POST por HTTP.
-    """
     thread_id = data.get("thread_id")
 
     timeout_por_tipo = {
@@ -3917,42 +3914,35 @@ async def llamar_fn_con_reintentos_y_cancelacion(call_fn,
         "resumen": 60,
         "flashcards": 45,
         "glosario": 45,
-        "evaluacion_formativa": 60
+        "evaluacion_formativa": 60,
+        "infografia": 350,
     }
-    timeout_total = timeout_por_tipo.get(tipo_contenido, 60)
+
+    timeout = timeout_total if timeout_total is not None else timeout_por_tipo.get(tipo_contenido, 60)
 
     for intento in range(max_intentos):
         try:
             print(f"🔄 Intento {intento + 1} de {max_intentos} para {tipo_contenido}")
 
-            # ✅ Cancelar runs huérfanos en reintentos
             if intento > 0 and thread_id:
                 await cancelar_runs_activos_si_reintento(thread_id, intento, max_intentos)
 
-            # ✅ Llamada interna con timeout
-            timeout = timeout_total or timeout_por_tipo.get(tipo_contenido, 60)
             data_response = await asyncio.wait_for(call_fn(data), timeout=timeout)
 
-            # ✅ Validación de contenido (igual que antes)
             contenido_texto = obtener_contenido_por_tipo(data_response, tipo_contenido)
             es_valido, mensaje = validar_contenido_segun_tipo(contenido_texto, tipo_contenido)
 
             if es_valido:
                 print(f"✅ {mensaje} (intento {intento + 1})")
                 return data_response
-            else:
-                print(f"🚫 Contenido rechazado: {mensaje} (intento {intento + 1})")
-                continue
+
+            print(f"🚫 Contenido rechazado: {mensaje} (intento {intento + 1})")
 
         except asyncio.TimeoutError:
             print(f"⏰ Timeout en intento {intento + 1}")
-            continue
-
         except Exception as e:
             print(f"❌ Error en intento {intento + 1}: {e}")
-            continue
 
-        # Backoff exponencial entre intentos (igual)
         if intento < max_intentos - 1:
             tiempo_espera = 2 ** intento
             print(f"⏳ Esperando {tiempo_espera}s antes del próximo intento...")
@@ -3998,39 +3988,44 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
     conn = None
     cursor = None
 
+    def parse_json_field(value, default):
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (str, bytes, bytearray)):
+            try:
+                return json.loads(value)
+            except Exception:
+                return default
+        return default
+
     try:
         conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # PRIMERO: Verificar si ya existe resumen y no se quiere regenerar
         if accion == "obtener":
             cursor.execute("""
                 SELECT tema_principal, ideas_principales, conceptos_clave, conclusion, metadata
-                FROM resumen 
-                WHERE id_guion_clase = %s 
-                ORDER BY version DESC 
+                FROM resumen
+                WHERE id_guion_clase = %s
+                ORDER BY version DESC
                 LIMIT 1
             """, (guion_id,))
-            
             resumen_existente = cursor.fetchone()
+
             if resumen_existente:
-                print("✅ Resumen encontrado en BD, devolviendo...")
-                
-                # Parsear JSON de la BD
-                ideas_principales = json.loads(resumen_existente['ideas_principales']) if resumen_existente['ideas_principales'] else []
-                conceptos_clave = json.loads(resumen_existente['conceptos_clave']) if resumen_existente['conceptos_clave'] else []
-                metadata = json.loads(resumen_existente['metadata']) if resumen_existente['metadata'] else {}
-                
-                # Formatear resumen_json para que tenga la misma estructura
+                ideas_principales = parse_json_field(resumen_existente.get("ideas_principales"), [])
+                conceptos_clave = parse_json_field(resumen_existente.get("conceptos_clave"), [])
+                metadata = parse_json_field(resumen_existente.get("metadata"), {})
+
                 resumen_json = {
-                    "tema_principal": resumen_existente['tema_principal'],
+                    "tema_principal": resumen_existente.get("tema_principal", ""),
                     "ideas_principales": ideas_principales,
                     "conceptos_clave": conceptos_clave,
-                    "conclusion": resumen_existente['conclusion']
+                    "conclusion": resumen_existente.get("conclusion", "")
                 }
-                
-                # Retornar EXACTAMENTE igual que antes - usando metadata guardado
+
                 return JSONResponse({
                     "resumen": resumen_json,
                     "unidad_nombre": metadata.get("unidad_nombre", "Sin nombre"),
@@ -4039,14 +4034,13 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
                     "nombre_asignatura": metadata.get("nombre_asignatura", "Asignatura no especificada"),
                     "nombre_unidad": metadata.get("nombre_unidad", "Unidad no especificada")
                 })
-        
-        # SI NO EXISTE O SE QUIERE REGENERAR: continuar con tu lógica original
+
         print(f"🔍 Obteniendo información del guión {guion_id}")
         cursor.execute("""
-            SELECT 
-                g.vector_id, 
-                g.assistant_id, 
-                u.nombre AS unidad_nombre, 
+            SELECT
+                g.vector_id,
+                g.assistant_id,
+                u.nombre AS unidad_nombre,
                 usr.nombre AS profesor,
                 c.nombre AS nombre_curso,
                 p.identificacion_clase
@@ -4059,28 +4053,40 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
             WHERE g.id = %s AND usr.tipo = 2
             LIMIT 1
         """, (guion_id,))
-        
+
         result = cursor.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="Guion no encontrado")
-            
-        # ✅ Verificar recursos ANTES de crear thread
+
         recursos_ok, mensaje_recursos = await verificar_recursos_antes_de_procesar(
-            result['vector_id'], 
-            result['assistant_id']
+            result["vector_id"],
+            result["assistant_id"]
         )
         if not recursos_ok:
             raise HTTPException(status_code=400, detail=mensaje_recursos)
-            
-        # GUARDAR result para usarlo después
+
         result_data = {
-            'vector_id': result['vector_id'],
-            'assistant_id': result['assistant_id'],
-            'unidad_nombre': result['unidad_nombre'],
-            'profesor': result['profesor'],
-            'nombre_curso': result['nombre_curso'],
-            'identificacion_clase': result['identificacion_clase']
+            "vector_id": result["vector_id"],
+            "assistant_id": result["assistant_id"],
+            "unidad_nombre": result.get("unidad_nombre"),
+            "profesor": result.get("profesor"),
+            "nombre_curso": result.get("nombre_curso"),
+            "identificacion_clase": result.get("identificacion_clase"),
         }
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    try:
+        # ✅ Crear thread ANTES de reintentos
+        await throttling_global()
+        nuevo_thread = client.beta.threads.create()
+        thread_id = nuevo_thread.id
+        print(f"🆕 Nuevo thread creado: {thread_id}")
+
         data = {
             "thread_id": thread_id,
             "vector_id": result_data["vector_id"],
@@ -4099,42 +4105,18 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
             data,
             max_intentos=3,
             tipo_contenido="resumen"
-        )    
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-    try:
-        # ✅ Throttling global ANTES de crear thread
-        await throttling_global()
-        
-        # Crear thread
-        nuevo_thread = client.beta.threads.create()
-        thread_id = nuevo_thread.id
-        print(f"🆕 Nuevo thread creado: {thread_id}")
-        
-        
-        data_response = await generar_resumen_fn(
-            assistant_id=result_data["assistant_id"],
-            thread_id=thread_id,
-            vector_id=result_data["vector_id"],
         )
 
-                
-        # ✅ Procesar respuesta
         if data_response:
             resumen_texto = data_response.get("resumen", "")
         else:
             resumen_texto = json.dumps({
                 "tema_principal": "Resumen de ejemplo",
                 "ideas_principales": ["Concepto 1", "Concepto 2"],
-                "conceptos_clave": ["Clave 1", "Clave 2"], 
+                "conceptos_clave": ["Clave 1", "Clave 2"],
                 "conclusion": "Contenido generado automáticamente"
             })
 
-        # Procesamiento del resumen (igual que antes)
         match = re.search(r'```json([\s\S]*?)```', resumen_texto)
         if match:
             try:
@@ -4147,76 +4129,58 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
             except json.JSONDecodeError:
                 resumen_json = {"texto": resumen_texto}
 
-        # Extraer nombre_asignatura (igual que antes)
-        nombre_asignatura = "Asignatura no especificada"
-        if result_data.get('identificacion_clase'):
-            try:
-                identificacion_data = json.loads(result_data['identificacion_clase'])
-                nombre_asignatura = identificacion_data.get('nombre_asignatura', result_data.get('nombre_curso', 'Asignatura no especificada'))
-            except:
-                nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        else:
-            nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        
-        # GUARDAR EN LA BASE DE DATOS
+        identificacion_data = parse_json_field(result_data.get("identificacion_clase"), {})
+        nombre_asignatura = identificacion_data.get(
+            "nombre_asignatura",
+            result_data.get("nombre_curso", "Asignatura no especificada")
+        )
+
         conn = connect_db()
         cursor = conn.cursor()
-        
-        # Obtener número de versión
+
         cursor.execute("""
             SELECT COALESCE(MAX(version), 0) + 1 as nueva_version
-            FROM resumen 
+            FROM resumen
             WHERE id_guion_clase = %s
         """, (guion_id,))
-        
         version_result = cursor.fetchone()
-        nueva_version = version_result[0] if version_result else 1
-        
-        # Preparar metadata para guardar (CON TODOS LOS DATOS)
+        nueva_version = version_result.get("nueva_version") if version_result else 1
+
         metadata = {
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
             "profesor": result_data.get("profesor", "Docente no especificado"),
             "nombre_curso": result_data.get("nombre_curso", "Curso no especificado"),
             "nombre_asignatura": nombre_asignatura,
             "nombre_unidad": result_data.get("unidad_nombre", "Unidad no especificada"),
-            "vector_id": result_data.get("vector_id"),  # Opcional: guardar para referencia
-            "assistant_id": result_data.get("assistant_id")  # Opcional
+            "vector_id": result_data.get("vector_id"),
+            "assistant_id": result_data.get("assistant_id")
         }
-        
-        # Insertar nuevo resumen
-        # BORRAR RESUMENES ANTERIORES DEL MISMO GUION
-        cursor.execute("""
-            DELETE FROM resumen 
-            WHERE id_guion_clase = %s
-        """, (guion_id,))
 
-        # Insertar nuevo resumen (SIEMPRE con version = 1)
+        cursor.execute("DELETE FROM resumen WHERE id_guion_clase = %s", (guion_id,))
+
         cursor.execute("""
             INSERT INTO resumen (
-                id_guion_clase, 
-                tema_principal, 
+                id_guion_clase,
+                tema_principal,
                 ideas_principales,
-                conceptos_clave, 
-                conclusion, 
+                conceptos_clave,
+                conclusion,
                 metadata,
                 version
-            ) VALUES (%s, %s, %s, %s, %s, %s, 1)  -- Versión siempre 1
+            ) VALUES (%s, %s, %s, %s, %s, %s, 1)
         """, (
             guion_id,
             resumen_json.get("tema_principal", ""),
-            json.dumps(resumen_json.get("ideas_principales", [])),
-            json.dumps(resumen_json.get("conceptos_clave", [])),
+            json.dumps(resumen_json.get("ideas_principales", []), ensure_ascii=False),
+            json.dumps(resumen_json.get("conceptos_clave", []), ensure_ascii=False),
             resumen_json.get("conclusion", ""),
-            json.dumps(metadata)
+            json.dumps(metadata, ensure_ascii=False)
         ))
-        
+
         conn.commit()
-        cursor.close()
-        conn.close()
-        
+
         print(f"✅ Resumen guardado en BD (v{nueva_version})")
-        
-        # RETORNAR EXACTAMENTE COMO SIEMPRE
+
         return JSONResponse({
             "resumen": resumen_json,
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
@@ -4226,20 +4190,26 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
             "nombre_unidad": result_data.get("unidad_nombre", "Unidad no especificada")
         })
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error en generación: {e}")
-        raise HTTPException(status_code=500, detail="Error generando resumen")
-        
     finally:
-        # Limpiar thread
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
         if thread_id:
             try:
                 client.beta.threads.delete(thread_id)
                 print(f"🧹 Thread {thread_id} eliminado")
             except Exception as e:
-                print(f"⚠️ No se pudo eliminar thread: {e}")            
+                print(f"⚠️ No se pudo eliminar thread: {e}")
+
+
 #########################################################################
 ##################
 ################## Funcion para obtener MAPA MENTAL 
@@ -4523,10 +4493,10 @@ def validar_profundidad_mapa(conceptos, relaciones):
     # O si tiene muchos conceptos, puede ser más plano pero informativo
     return len(niveles) >= 2 or len(conceptos) >= 5
 
-
+from app.services.openai_assistants import generar_mapa_conceptual_fn
 @app.get("/planificacion/{guion_id}/mapa-conceptual")
 async def generar_mapa_conceptual(
-    guion_id: int, 
+    guion_id: int,
     accion: str = Query("obtener", description="Acción: 'obtener' (default), 'regenerar'")
 ):
     print(f"🗺️ Mapa conceptual - Guión: {guion_id}, Acción: {accion}")
@@ -4534,39 +4504,51 @@ async def generar_mapa_conceptual(
     conn = None
     cursor = None
 
+    def parse_json_field(value, default):
+        """
+        Acepta JSONB (dict/list), string JSON o None.
+        Devuelve default si no se puede parsear.
+        """
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (str, bytes, bytearray)):
+            try:
+                return json.loads(value)
+            except Exception:
+                return default
+        return default
+
+    # -------------------- 1) BD: obtener existente o cargar datos base --------------------
     try:
-        # 1. Conectar a BD
         conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # 2. Verificar si ya existe mapa y no se quiere regenerar
+        # 1.1) Si ya existe y no se quiere regenerar
         if accion == "obtener":
             cursor.execute("""
                 SELECT titulo, conceptos, relaciones, metadata
-                FROM mapa_conceptual 
-                WHERE id_guion_clase = %s 
-                ORDER BY version DESC 
+                FROM mapa_conceptual
+                WHERE id_guion_clase = %s
+                ORDER BY version DESC
                 LIMIT 1
             """, (guion_id,))
-            
+
             mapa_existente = cursor.fetchone()
             if mapa_existente:
                 print("✅ Mapa conceptual encontrado en BD, devolviendo...")
-                
-                # Parsear JSON de la BD
-                conceptos = json.loads(mapa_existente['conceptos']) if mapa_existente['conceptos'] else []
-                relaciones = json.loads(mapa_existente['relaciones']) if mapa_existente['relaciones'] else []
-                metadata = json.loads(mapa_existente['metadata']) if mapa_existente['metadata'] else {}
-                
-                # Formatear mapa_procesado
+
+                conceptos = parse_json_field(mapa_existente.get("conceptos"), [])
+                relaciones = parse_json_field(mapa_existente.get("relaciones"), [])
+                metadata = parse_json_field(mapa_existente.get("metadata"), {})
+
                 mapa_procesado = {
-                    "titulo": mapa_existente.get('titulo', ''),
+                    "titulo": mapa_existente.get("titulo", "") or "",
                     "conceptos": conceptos,
                     "relaciones": relaciones
                 }
-                
-                # Retornar EXACTAMENTE igual que antes
+
                 return {
                     "mapa_conceptual": mapa_procesado,
                     "unidad_nombre": metadata.get("unidad_nombre"),
@@ -4575,15 +4557,15 @@ async def generar_mapa_conceptual(
                     "nombre_asignatura": metadata.get("nombre_asignatura", "Asignatura no especificada"),
                     "nombre_curso": metadata.get("nombre_curso", "Curso no especificado")
                 }
-        
-        # 3. Si no existe o se quiere regenerar, obtener información del guión
+
+        # 1.2) Si no existe o se quiere regenerar: cargar info del guion
         print(f"🔍 Obteniendo información del guión {guion_id}")
         cursor.execute("""
-            SELECT 
-                g.vector_id, 
-                g.assistant_id, 
-                g.titulo, 
-                u.nombre AS unidad_nombre, 
+            SELECT
+                g.vector_id,
+                g.assistant_id,
+                g.titulo,
+                u.nombre AS unidad_nombre,
                 usr.nombre AS profesor,
                 c.nombre AS nombre_curso,
                 p.identificacion_clase
@@ -4596,51 +4578,32 @@ async def generar_mapa_conceptual(
             WHERE g.id = %s AND usr.tipo = 2
             LIMIT 1
         """, (guion_id,))
-        
+
         result = cursor.fetchone()
-        
         if not result:
             raise HTTPException(status_code=404, detail=f"Guion {guion_id} no encontrado")
-            
-        # ✅ Verificar recursos ANTES de crear thread
+
+        # Verificar recursos ANTES
         recursos_ok, mensaje_recursos = await verificar_recursos_antes_de_procesar(
-            result['vector_id'], 
-            result['assistant_id']
+            result["vector_id"],
+            result["assistant_id"]
         )
         if not recursos_ok:
             raise HTTPException(status_code=400, detail=mensaje_recursos)
-            
+
         # Guardar result para usarlo después
         result_data = {
-            'vector_id': result['vector_id'],
-            'assistant_id': result['assistant_id'],
-            'titulo': result['titulo'],
-            'unidad_nombre': result['unidad_nombre'],
-            'profesor': result['profesor'],
-            'nombre_curso': result['nombre_curso'],
-            'identificacion_clase': result['identificacion_clase']
+            "vector_id": result["vector_id"],
+            "assistant_id": result["assistant_id"],
+            "titulo": result.get("titulo") or "",
+            "unidad_nombre": result.get("unidad_nombre"),
+            "profesor": result.get("profesor"),
+            "nombre_curso": result.get("nombre_curso"),
+            "identificacion_clase": result.get("identificacion_clase"),
         }
-        data = {
-            "thread_id": thread_id,
-            "vector_id": result_data["vector_id"],
-            "assistant_id": result_data["assistant_id"],
-            "titulo_guion": result_data["titulo"],
-        }    
-        async def call_fn(payload):
-            return await generar_mapa_conceptual_fn(
-                assistant_id=payload["assistant_id"],
-                thread_id=payload["thread_id"],
-                vector_id=payload["vector_id"],
-                titulo_guion=payload["titulo_guion"],
-            )
-        data_response = await llamar_fn_con_reintentos_y_cancelacion(
-            call_fn,
-            data,
-            max_intentos=3,
-            tipo_contenido="mapa_conceptual"
-        )
 
-
+    except HTTPException:
+        raise
     except Exception as db_error:
         print(f"❌ Error en base de datos: {db_error}")
         raise HTTPException(status_code=500, detail=f"Error accediendo a datos: {str(db_error)}")
@@ -4649,64 +4612,68 @@ async def generar_mapa_conceptual(
             cursor.close()
         if conn:
             conn.close()
-    # GUARDAR EN LA BASE DE DATOS
-  
+
+    # -------------------- 2) Generación con reintentos (con thread válido) --------------------
     try:
-        # ✅ Throttling global ANTES de crear thread
         await throttling_global()
-        
-        # ✅ Crear thread y llamar API
+
+        # ✅ Crear thread ANTES de reintentos
         nuevo_thread = client.beta.threads.create()
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para mapa: {thread_id}")
-        
-        from app.services.openai_assistants import generar_mapa_conceptual_fn
 
-        data_response = await generar_mapa_conceptual_fn(
-            assistant_id=result_data["assistant_id"],
-            thread_id=thread_id,
-            vector_id=result_data["vector_id"],
-            titulo_guion=result_data["titulo"],
+        data = {
+            "thread_id": thread_id,
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+            "titulo_guion": result_data["titulo"],
+        }
+
+        async def call_fn(payload):
+            return await generar_mapa_conceptual_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+                titulo_guion=payload["titulo_guion"],
+            )
+
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=3,
+            tipo_contenido="mapa_conceptual"
         )
 
-        
-        
         if not data_response:
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail="No se pudo generar un mapa conceptual válido después de 3 intentos"
             )
-        
-        # Procesar respuesta exitosa
+
         mapa_texto = data_response.get("mapa_conceptual", "")
         mapa_procesado = procesar_mapa_conceptual_api(mapa_texto)
-        
-        # Extraer nombre_asignatura
-        nombre_asignatura = "Asignatura no especificada"
-        if result_data.get('identificacion_clase'):
-            try:
-                identificacion_data = json.loads(result_data['identificacion_clase'])
-                nombre_asignatura = identificacion_data.get('nombre_asignatura', result_data.get('nombre_curso', 'Asignatura no especificada'))
-            except:
-                nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        else:
-            nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        
-        # GUARDAR EN LA BASE DE DATOS
+
+        # Nombre asignatura (identificacion_clase puede ser dict o string)
+        identificacion_data = parse_json_field(result_data.get("identificacion_clase"), {})
+        nombre_asignatura = identificacion_data.get(
+            "nombre_asignatura",
+            result_data.get("nombre_curso", "Asignatura no especificada")
+        )
+
+        # -------------------- 3) Guardar en BD --------------------
         conn = connect_db()
         cursor = conn.cursor()
-        
-        # Obtener número de versión
+
         cursor.execute("""
             SELECT COALESCE(MAX(version), 0) + 1 as nueva_version
-            FROM mapa_conceptual 
+            FROM mapa_conceptual
             WHERE id_guion_clase = %s
         """, (guion_id,))
-        
+
         version_result = cursor.fetchone()
-        nueva_version = version_result[0] if version_result else 1
-        
-        # Preparar metadata para guardar
+        # ✅ FIX KeyError:0
+        nueva_version = version_result.get("nueva_version") if version_result else 1
+
         metadata = {
             "unidad_nombre": result_data.get("unidad_nombre"),
             "profesor": result_data.get("profesor"),
@@ -4716,36 +4683,34 @@ async def generar_mapa_conceptual(
             "vector_id": result_data.get("vector_id"),
             "assistant_id": result_data.get("assistant_id")
         }
-        
-        # BORRAR MAPAS CONCEPTUALES ANTERIORES DEL MISMO GUION
+
+        # Borrar anteriores del mismo guion
         cursor.execute("""
-            DELETE FROM mapa_conceptual 
+            DELETE FROM mapa_conceptual
             WHERE id_guion_clase = %s
         """, (guion_id,))
 
-        # Insertar nuevo mapa (SIEMPRE con version = 1)
+        # Insertar nuevo (version siempre 1 según tu decisión)
         cursor.execute("""
             INSERT INTO mapa_conceptual (
-                id_guion_clase, 
-                titulo, 
+                id_guion_clase,
+                titulo,
                 conceptos,
-                relaciones, 
+                relaciones,
                 metadata,
                 version
             ) VALUES (%s, %s, %s, %s, %s, 1)
         """, (
             guion_id,
-            mapa_procesado.get("titulo", ""),
-            json.dumps(mapa_procesado.get("conceptos", [])),
-            json.dumps(mapa_procesado.get("relaciones", [])),
-            json.dumps(metadata)
+            mapa_procesado.get("titulo", "") if isinstance(mapa_procesado, dict) else "",
+            json.dumps(mapa_procesado.get("conceptos", []), ensure_ascii=False) if isinstance(mapa_procesado, dict) else "[]",
+            json.dumps(mapa_procesado.get("relaciones", []), ensure_ascii=False) if isinstance(mapa_procesado, dict) else "[]",
+            json.dumps(metadata, ensure_ascii=False)
         ))
+
         conn.commit()
-        cursor.close()
-        conn.close()
         print(f"✅ Mapa conceptual guardado en BD (v{nueva_version})")
-        
-        # RETORNAR EXACTAMENTE IGUAL
+
         return {
             "mapa_conceptual": mapa_procesado,
             "unidad_nombre": result_data.get("unidad_nombre"),
@@ -4754,22 +4719,34 @@ async def generar_mapa_conceptual(
             "nombre_asignatura": nombre_asignatura,
             "nombre_curso": result_data.get("nombre_curso", "Curso no especificado")
         }
-            
+
     except HTTPException:
         raise
     except Exception as api_error:
         print(f"❌ Error en generación de mapa: {api_error}")
         raise HTTPException(status_code=500, detail=f"Error generando mapa conceptual: {str(api_error)}")
-        
+
     finally:
-        # ✅ Limpiar thread
+        # cerrar DB si quedó abierta
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
+        # limpiar thread
         if thread_id:
             try:
                 client.beta.threads.delete(thread_id)
                 print(f"🧹 Thread {thread_id} eliminado")
             except Exception as e:
                 print(f"⚠️ No se pudo eliminar thread: {e}")
-        
+  
 
 
 @app.post("/planificacion/{guion_id}/mapa-conceptual/regenerar")
@@ -4822,7 +4799,7 @@ from app.services.openai_assistants import generar_flashcards_fn
 #########################################################################
 @app.get("/planificacion/{guion_id}/flashcards")
 async def generar_flashcards(
-    guion_id: int, 
+    guion_id: int,
     accion: str = Query("obtener", description="Acción: 'obtener' (default), 'regenerar'")
 ):
     print(f"📚 Flashcards - Guión: {guion_id}, Acción: {accion}")
@@ -4830,43 +4807,51 @@ async def generar_flashcards(
     conn = None
     cursor = None
 
+    def parse_json_field(value, default):
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (str, bytes, bytearray)):
+            try:
+                return json.loads(value)
+            except Exception:
+                return default
+        return default
+
+    # -------------------- 1) BD: devolver existentes o cargar datos base --------------------
     try:
-        # 1. Conectar a BD
         conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # 2. Verificar si ya existen flashcards y no se quiere regenerar
         if accion == "obtener":
             cursor.execute("""
                 SELECT cards, metadata
-                FROM flashcard 
-                WHERE id_guion_clase = %s 
-                ORDER BY version DESC 
+                FROM flashcard
+                WHERE id_guion_clase = %s
+                ORDER BY version DESC
                 LIMIT 1
             """, (guion_id,))
-            
+
             flashcards_existentes = cursor.fetchone()
             if flashcards_existentes:
                 print("✅ Flashcards encontradas en BD, devolviendo...")
-                
-                # Parsear JSON de la BD
-                cards = json.loads(flashcards_existentes['cards']) if flashcards_existentes['cards'] else []
-                metadata = json.loads(flashcards_existentes['metadata']) if flashcards_existentes['metadata'] else {}
-                total_cards = len(cards)
-                
-                # Formatear flashcards
+
+                cards = parse_json_field(flashcards_existentes.get("cards"), [])
+                metadata = parse_json_field(flashcards_existentes.get("metadata"), {})
+                total_cards = len(cards) if isinstance(cards, list) else 0
+
                 flashcards_formateadas = []
-                for i, card in enumerate(cards):
-                    if isinstance(card, dict):
-                        flashcards_formateadas.append({
-                            "id": i + 1,
-                            "pregunta": card.get("pregunta", f"Pregunta {i+1}"),
-                            "respuesta": card.get("respuesta", f"Respuesta {i+1}"),
-                            "categoria": card.get("categoria", "concepto")
-                        })
-                
-                # Retornar EXACTAMENTE igual que antes
+                if isinstance(cards, list):
+                    for i, card in enumerate(cards):
+                        if isinstance(card, dict):
+                            flashcards_formateadas.append({
+                                "id": i + 1,
+                                "pregunta": card.get("pregunta", f"Pregunta {i+1}"),
+                                "respuesta": card.get("respuesta", f"Respuesta {i+1}"),
+                                "categoria": card.get("categoria", "concepto")
+                            })
+
                 return JSONResponse({
                     "flashcards": flashcards_formateadas,
                     "unidad_nombre": metadata.get("unidad_nombre", "Sin nombre"),
@@ -4876,14 +4861,14 @@ async def generar_flashcards(
                     "nombre_unidad": metadata.get("nombre_unidad", "Unidad no especificada"),
                     "total_cards": total_cards
                 })
-        
-        # 3. Si no existen o se quiere regenerar, obtener información del guión
+
+        # Si no existen o se quiere regenerar
         print(f"🔍 Obteniendo información del guión {guion_id}")
         cursor.execute("""
-            SELECT 
-                g.vector_id, 
-                g.assistant_id, 
-                u.nombre AS unidad_nombre, 
+            SELECT
+                g.vector_id,
+                g.assistant_id,
+                u.nombre AS unidad_nombre,
                 usr.nombre AS profesor,
                 c.nombre AS nombre_curso,
                 p.identificacion_clase
@@ -4896,44 +4881,41 @@ async def generar_flashcards(
             WHERE g.id = %s AND usr.tipo = 2
             LIMIT 1
         """, (guion_id,))
-        
+
         result = cursor.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="Guion no encontrado")
-            
-        # ✅ Verificar recursos ANTES de crear thread
+
         recursos_ok, mensaje_recursos = await verificar_recursos_antes_de_procesar(
-            result['vector_id'], 
-            result['assistant_id']
+            result["vector_id"],
+            result["assistant_id"]
         )
         if not recursos_ok:
             raise HTTPException(status_code=400, detail=mensaje_recursos)
-            
-        # Guardar result para usarlo después
+
         result_data = {
-            'vector_id': result['vector_id'],
-            'assistant_id': result['assistant_id'],
-            'unidad_nombre': result['unidad_nombre'],
-            'profesor': result['profesor'],
-            'nombre_curso': result['nombre_curso'],
-            'identificacion_clase': result['identificacion_clase']
+            "vector_id": result["vector_id"],
+            "assistant_id": result["assistant_id"],
+            "unidad_nombre": result.get("unidad_nombre"),
+            "profesor": result.get("profesor"),
+            "nombre_curso": result.get("nombre_curso"),
+            "identificacion_clase": result.get("identificacion_clase")
         }
-            
+
     finally:
         if cursor:
             cursor.close()
         if conn:
             conn.close()
 
+    # -------------------- 2) Generación con reintentos --------------------
     try:
-        # ✅ Throttling global ANTES de crear thread
         await throttling_global()
-        
-        # Crear thread
+
         nuevo_thread = client.beta.threads.create()
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para flashcards: {thread_id}")
-        
+
         data = {
             "thread_id": thread_id,
             "vector_id": result_data["vector_id"],
@@ -4953,14 +4935,10 @@ async def generar_flashcards(
             max_intentos=3,
             tipo_contenido="flashcards"
         )
-                
-        # ✅ MANTENER: Tu lógica de procesamiento actual
-        if data_response:
-            flashcards_texto = data_response.get("flashcards", "")
-        else:
-            flashcards_texto = ""
 
-        # Tu lógica actual de procesamiento de flashcards...
+        flashcards_texto = data_response.get("flashcards", "") if data_response else ""
+
+        # -------------------- 2.1) Tu parsing actual --------------------
         match = re.search(r'```json([\s\S]*?)```', flashcards_texto)
         if match:
             try:
@@ -4973,7 +4951,6 @@ async def generar_flashcards(
             except json.JSONDecodeError:
                 flashcards_json = {"error": "No se pudieron generar las flashcards"}
 
-        # Asegurar que tenemos un array de flashcards
         if isinstance(flashcards_json, dict) and "flashcards" in flashcards_json:
             flashcards_array = flashcards_json["flashcards"]
         elif isinstance(flashcards_json, list):
@@ -4981,7 +4958,6 @@ async def generar_flashcards(
         else:
             flashcards_array = []
 
-        # Validar y formatear las flashcards
         flashcards_formateadas = []
         for i, card in enumerate(flashcards_array):
             if isinstance(card, dict):
@@ -4992,44 +4968,36 @@ async def generar_flashcards(
                     "categoria": card.get("categoria", "concepto")
                 })
 
-        # Si no se generaron flashcards válidas, crear algunas de ejemplo
         if not flashcards_formateadas:
             print("⚠️ No se generaron flashcards válidas, creando ejemplo...")
-            flashcards_formateadas = [
-                {
-                    "id": 1,
-                    "pregunta": "Ejemplo de pregunta sobre el contenido",
-                    "respuesta": "Ejemplo de respuesta explicativa",
-                    "categoria": "concepto"
-                }
-            ]
-        
-        # Extraer nombre_asignatura
-        nombre_asignatura = "Asignatura no especificada"
-        if result_data.get('identificacion_clase'):
-            try:
-                identificacion_data = json.loads(result_data['identificacion_clase'])
-                nombre_asignatura = identificacion_data.get('nombre_asignatura', result_data.get('nombre_curso', 'Asignatura no especificada'))
-            except:
-                nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        else:
-            nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        
-        # GUARDAR EN LA BASE DE DATOS
+            flashcards_formateadas = [{
+                "id": 1,
+                "pregunta": "Ejemplo de pregunta sobre el contenido",
+                "respuesta": "Ejemplo de respuesta explicativa",
+                "categoria": "concepto"
+            }]
+
+        # -------------------- 2.2) Nombre asignatura robusto --------------------
+        identificacion_data = parse_json_field(result_data.get("identificacion_clase"), {})
+        nombre_asignatura = identificacion_data.get(
+            "nombre_asignatura",
+            result_data.get("nombre_curso", "Asignatura no especificada")
+        )
+
+        # -------------------- 3) Guardar en BD --------------------
         conn = connect_db()
         cursor = conn.cursor()
-        
-        # Obtener número de versión
+
         cursor.execute("""
             SELECT COALESCE(MAX(version), 0) + 1 as nueva_version
-            FROM flashcard 
+            FROM flashcard
             WHERE id_guion_clase = %s
         """, (guion_id,))
-        
+
         version_result = cursor.fetchone()
-        nueva_version = version_result[0] if version_result else 1
-        
-        # Preparar metadata para guardar
+        # ✅ FIX KeyError:0
+        nueva_version = version_result.get("nueva_version") if version_result else 1
+
         metadata = {
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
             "profesor": result_data.get("profesor", "Docente no especificado"),
@@ -5039,36 +5007,27 @@ async def generar_flashcards(
             "vector_id": result_data.get("vector_id"),
             "assistant_id": result_data.get("assistant_id")
         }
-        
-        total_cards = len(flashcards_formateadas)
-        
-        # BORRAR FLASHCARDS ANTERIORES DEL MISMO GUION
-        cursor.execute("""
-            DELETE FROM flashcard 
-            WHERE id_guion_clase = %s
-        """, (guion_id,))
 
-        # Insertar nuevas flashcards (SIEMPRE con version = 1)
+        total_cards = len(flashcards_formateadas)
+
+        cursor.execute("DELETE FROM flashcard WHERE id_guion_clase = %s", (guion_id,))
+
         cursor.execute("""
             INSERT INTO flashcard (
-                id_guion_clase, 
-                cards, 
+                id_guion_clase,
+                cards,
                 metadata,
                 version
             ) VALUES (%s, %s, %s, 1)
         """, (
             guion_id,
-            json.dumps(flashcards_formateadas),
-            json.dumps(metadata)
+            json.dumps(flashcards_formateadas, ensure_ascii=False),
+            json.dumps(metadata, ensure_ascii=False)
         ))
-        
+
         conn.commit()
-        cursor.close()
-        conn.close()
-        
         print(f"✅ Flashcards guardadas en BD (v{nueva_version}) - {total_cards} cards")
-        
-        # RETORNAR EXACTAMENTE IGUAL
+
         return JSONResponse({
             "flashcards": flashcards_formateadas,
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
@@ -5084,9 +5043,19 @@ async def generar_flashcards(
     except Exception as e:
         print(f"❌ Error en generación de flashcards: {e}")
         raise HTTPException(status_code=500, detail="Error generando flashcards")
-        
+
     finally:
-        # Limpiar thread
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
         if thread_id:
             try:
                 client.beta.threads.delete(thread_id)
@@ -5144,7 +5113,7 @@ from app.services.openai_assistants import generar_glosario_fn
 #########################################################################
 @app.get("/planificacion/{guion_id}/glosario")
 async def generar_glosario(
-    guion_id: int, 
+    guion_id: int,
     accion: str = Query("obtener", description="Acción: 'obtener' (default), 'regenerar'")
 ):
     print(f"📖 Glosario - Guión: {guion_id}, Acción: {accion}")
@@ -5152,44 +5121,52 @@ async def generar_glosario(
     conn = None
     cursor = None
 
+    def parse_json_field(value, default):
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (str, bytes, bytearray)):
+            try:
+                return json.loads(value)
+            except Exception:
+                return default
+        return default
+
+    # -------------------- 1) BD: devolver existentes o cargar datos base --------------------
     try:
-        # 1. Conectar a BD
         conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # 2. Verificar si ya existe glosario y no se quiere regenerar
         if accion == "obtener":
             cursor.execute("""
                 SELECT terminos, metadata
-                FROM glosario 
-                WHERE id_guion_clase = %s 
-                ORDER BY version DESC 
+                FROM glosario
+                WHERE id_guion_clase = %s
+                ORDER BY version DESC
                 LIMIT 1
             """, (guion_id,))
-            
+
             glosario_existente = cursor.fetchone()
             if glosario_existente:
                 print("✅ Glosario encontrado en BD, devolviendo...")
-                
-                # Parsear JSON de la BD
-                terminos = json.loads(glosario_existente['terminos']) if glosario_existente['terminos'] else []
-                metadata = json.loads(glosario_existente['metadata']) if glosario_existente['metadata'] else {}
-                total_terminos = len(terminos)
-                
-                # Formatear glosario
+
+                terminos = parse_json_field(glosario_existente.get("terminos"), [])
+                metadata = parse_json_field(glosario_existente.get("metadata"), {})
+                total_terminos = len(terminos) if isinstance(terminos, list) else 0
+
                 glosario_formateado = []
-                for i, termino in enumerate(terminos):
-                    if isinstance(termino, dict):
-                        glosario_formateado.append({
-                            "id": i + 1,
-                            "termino": termino.get("termino", f"Término {i+1}"),
-                            "definicion": termino.get("definicion", f"Definición del término {i+1}"),
-                            "categoria": termino.get("categoria", "general"),
-                            "ejemplo": termino.get("ejemplo", "")
-                        })
-                
-                # Retornar EXACTAMENTE igual que antes
+                if isinstance(terminos, list):
+                    for i, termino in enumerate(terminos):
+                        if isinstance(termino, dict):
+                            glosario_formateado.append({
+                                "id": i + 1,
+                                "termino": termino.get("termino", f"Término {i+1}"),
+                                "definicion": termino.get("definicion", f"Definición del término {i+1}"),
+                                "categoria": termino.get("categoria", "general"),
+                                "ejemplo": termino.get("ejemplo", "")
+                            })
+
                 return JSONResponse({
                     "glosario": glosario_formateado,
                     "unidad_nombre": metadata.get("unidad_nombre", "Sin nombre"),
@@ -5198,14 +5175,14 @@ async def generar_glosario(
                     "nombre_asignatura": metadata.get("nombre_asignatura", "Asignatura no especificada"),
                     "total_terminos": total_terminos
                 })
-        
-        # 3. Si no existe o se quiere regenerar, obtener información del guión
+
+        # Si no existe o se quiere regenerar
         print(f"🔍 Obteniendo información del guión {guion_id}")
         cursor.execute("""
-            SELECT 
-                g.vector_id, 
-                g.assistant_id, 
-                u.nombre AS unidad_nombre, 
+            SELECT
+                g.vector_id,
+                g.assistant_id,
+                u.nombre AS unidad_nombre,
                 usr.nombre AS profesor,
                 c.nombre AS nombre_curso,
                 p.identificacion_clase
@@ -5218,45 +5195,40 @@ async def generar_glosario(
             WHERE g.id = %s AND usr.tipo = 2
             LIMIT 1
         """, (guion_id,))
-        
+
         result = cursor.fetchone()
         if not result:
             raise HTTPException(status_code=404, detail="Guion no encontrado")
-            
-        # ✅ Verificar recursos ANTES de crear thread
+
         recursos_ok, mensaje_recursos = await verificar_recursos_antes_de_procesar(
-            result['vector_id'], 
-            result['assistant_id']
+            result["vector_id"],
+            result["assistant_id"]
         )
         if not recursos_ok:
             raise HTTPException(status_code=400, detail=mensaje_recursos)
-            
-        # Guardar result para usarlo después
+
         result_data = {
-            'vector_id': result['vector_id'],
-            'assistant_id': result['assistant_id'],
-            'unidad_nombre': result['unidad_nombre'],
-            'profesor': result['profesor'],
-            'nombre_curso': result['nombre_curso'],
-            'identificacion_clase': result['identificacion_clase']
+            "vector_id": result["vector_id"],
+            "assistant_id": result["assistant_id"],
+            "unidad_nombre": result.get("unidad_nombre"),
+            "profesor": result.get("profesor"),
+            "nombre_curso": result.get("nombre_curso"),
+            "identificacion_clase": result.get("identificacion_clase")
         }
-            
+
     finally:
         if cursor:
             cursor.close()
         if conn:
             conn.close()
 
+    # -------------------- 2) Generación con reintentos --------------------
     try:
-        # ✅ Throttling global ANTES de crear thread
         await throttling_global()
-        
-        # Crear thread
+
         nuevo_thread = client.beta.threads.create()
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para glosario: {thread_id}")
-        
-
 
         data = {
             "thread_id": thread_id,
@@ -5278,14 +5250,9 @@ async def generar_glosario(
             tipo_contenido="glosario"
         )
 
-        
-        # ✅ MANTENER: Tu lógica de procesamiento actual
-        if data_response:
-            glosario_texto = data_response.get("glosario", "")
-        else:
-            glosario_texto = ""
+        glosario_texto = data_response.get("glosario", "") if data_response else ""
 
-        # Tu lógica actual de procesamiento de glosario...
+        # -------------------- 2.1) Tu parsing actual --------------------
         match = re.search(r'```json([\s\S]*?)```', glosario_texto)
         if match:
             try:
@@ -5298,7 +5265,6 @@ async def generar_glosario(
             except json.JSONDecodeError:
                 glosario_json = {"error": "No se pudo generar el glosario"}
 
-        # Asegurar que tenemos un array de términos del glosario
         if isinstance(glosario_json, dict) and "glosario" in glosario_json:
             glosario_array = glosario_json["glosario"]
         elif isinstance(glosario_json, list):
@@ -5306,7 +5272,6 @@ async def generar_glosario(
         else:
             glosario_array = []
 
-        # Validar y formatear los términos del glosario
         glosario_formateado = []
         for i, termino in enumerate(glosario_array):
             if isinstance(termino, dict):
@@ -5318,45 +5283,37 @@ async def generar_glosario(
                     "ejemplo": termino.get("ejemplo", "")
                 })
 
-        # Si no se generó glosario válido, crear ejemplo
         if not glosario_formateado:
             print("⚠️ No se generó glosario válido, crear ejemplo...")
-            glosario_formateado = [
-                {
-                    "id": 1,
-                    "termino": "Concepto Principal",
-                    "definicion": "Definición fundamental del concepto clave del contenido",
-                    "categoria": "concepto",
-                    "ejemplo": "Ejemplo práctico de aplicación del concepto"
-                }
-            ]
-        
-        # Extraer nombre_asignatura
-        nombre_asignatura = "Asignatura no especificada"
-        if result_data.get('identificacion_clase'):
-            try:
-                identificacion_data = json.loads(result_data['identificacion_clase'])
-                nombre_asignatura = identificacion_data.get('nombre_asignatura', result_data.get('nombre_curso', 'Asignatura no especificada'))
-            except:
-                nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        else:
-            nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        
-        # GUARDAR EN LA BASE DE DATOS
+            glosario_formateado = [{
+                "id": 1,
+                "termino": "Concepto Principal",
+                "definicion": "Definición fundamental del concepto clave del contenido",
+                "categoria": "concepto",
+                "ejemplo": "Ejemplo práctico de aplicación del concepto"
+            }]
+
+        # -------------------- 2.2) Nombre asignatura robusto --------------------
+        identificacion_data = parse_json_field(result_data.get("identificacion_clase"), {})
+        nombre_asignatura = identificacion_data.get(
+            "nombre_asignatura",
+            result_data.get("nombre_curso", "Asignatura no especificada")
+        )
+
+        # -------------------- 3) Guardar en BD --------------------
         conn = connect_db()
         cursor = conn.cursor()
-        
-        # Obtener número de versión
+
         cursor.execute("""
             SELECT COALESCE(MAX(version), 0) + 1 as nueva_version
-            FROM glosario 
+            FROM glosario
             WHERE id_guion_clase = %s
         """, (guion_id,))
-        
+
         version_result = cursor.fetchone()
-        nueva_version = version_result[0] if version_result else 1
-        
-        # Preparar metadata para guardar
+        # ✅ FIX KeyError:0
+        nueva_version = version_result.get("nueva_version") if version_result else 1
+
         metadata = {
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
             "profesor": result_data.get("profesor", "Docente no especificado"),
@@ -5366,36 +5323,27 @@ async def generar_glosario(
             "vector_id": result_data.get("vector_id"),
             "assistant_id": result_data.get("assistant_id")
         }
-        
-        total_terminos = len(glosario_formateado)
-        
-        # BORRAR GLOSARIOS ANTERIORES DEL MISMO GUION
-        cursor.execute("""
-            DELETE FROM glosario 
-            WHERE id_guion_clase = %s
-        """, (guion_id,))
 
-        # Insertar nuevo glosario (SIEMPRE con version = 1)
+        total_terminos = len(glosario_formateado)
+
+        cursor.execute("DELETE FROM glosario WHERE id_guion_clase = %s", (guion_id,))
+
         cursor.execute("""
             INSERT INTO glosario (
-                id_guion_clase, 
-                terminos, 
+                id_guion_clase,
+                terminos,
                 metadata,
                 version
             ) VALUES (%s, %s, %s, 1)
         """, (
             guion_id,
-            json.dumps(glosario_formateado),
-            json.dumps(metadata)
+            json.dumps(glosario_formateado, ensure_ascii=False),
+            json.dumps(metadata, ensure_ascii=False)
         ))
-                
+
         conn.commit()
-        cursor.close()
-        conn.close()
-        
         print(f"✅ Glosario guardado en BD (v{nueva_version}) - {total_terminos} términos")
-        
-        # RETORNAR EXACTAMENTE IGUAL
+
         return JSONResponse({
             "glosario": glosario_formateado,
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
@@ -5410,9 +5358,19 @@ async def generar_glosario(
     except Exception as e:
         print(f"❌ Error en generación de glosario: {e}")
         raise HTTPException(status_code=500, detail="Error generando glosario")
-        
+
     finally:
-        # Limpiar thread
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
         if thread_id:
             try:
                 client.beta.threads.delete(thread_id)
@@ -5472,62 +5430,71 @@ from app.services.openai_assistants import generar_infografia_fn
 #########################################################################
 @app.get("/planificacion/{guion_id}/infografia")
 async def generar_infografia(
-    guion_id: int, 
+    guion_id: int,
     accion: str = Query("obtener", description="Acción: 'obtener' (default), 'regenerar'")
 ):
     print(f"🎨 Infografía - Guión: {guion_id}, Acción: {accion}")
-    
+
     thread_id = None
     conn = None
     cursor = None
 
+    def parse_json_field(value, default):
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, (str, bytes, bytearray)):
+            try:
+                return json.loads(value)
+            except Exception:
+                return default
+        return default
+
+    # -------------------- 1) BD: devolver existentes o cargar datos base --------------------
     try:
-        # 1. Conectar a BD
         conn = connect_db()
         cursor = conn.cursor()
 
-        
-        # 2. Verificar si ya existe infografía y no se quiere regenerar
         if accion == "obtener":
             cursor.execute("""
-                SELECT imagen_url, imagen_base64, metadata, titulo 
-                FROM infografia 
-                WHERE id_guion_clase = %s 
-                ORDER BY version DESC 
+                SELECT imagen_url, imagen_base64, metadata, titulo
+                FROM infografia
+                WHERE id_guion_clase = %s
+                ORDER BY version DESC
                 LIMIT 1
             """, (guion_id,))
-            
+
             infografia_existente = cursor.fetchone()
             if infografia_existente:
                 print("✅ Infografía encontrada en BD, verificando...")
-                
-                # Parsear metadata
-                metadata = json.loads(infografia_existente['metadata']) if infografia_existente['metadata'] else {}
-                
-                # Obtener la imagen
+
+                metadata = parse_json_field(infografia_existente.get("metadata"), {})
+
                 imagen_base64 = None
-                
-                # 2.1 Si ya tenemos base64 guardado (completo o parcial)
-                if infografia_existente['imagen_base64'] and len(infografia_existente['imagen_base64']) > 100:
-                    imagen_base64 = infografia_existente['imagen_base64']
+                imagen_base64_db = infografia_existente.get("imagen_base64") or ""
+                imagen_url_db = infografia_existente.get("imagen_url") or ""
+
+                # 1) si hay base64 real guardado
+                if isinstance(imagen_base64_db, str) and len(imagen_base64_db) > 100 and not imagen_base64_db.startswith("[Imagen base64 truncada"):
+                    imagen_base64 = imagen_base64_db
                     print(f"📁 Imagen encontrada en BD (base64): {len(imagen_base64)} chars")
-                
-                # 2.2 Si no, pero tenemos URL de Banana, descargarla
-                elif infografia_existente['imagen_url'] and infografia_existente['imagen_url'].startswith('http'):
+
+                # 2) si no, pero hay URL válida, descargar
+                elif isinstance(imagen_url_db, str) and imagen_url_db.startswith("http"):
                     try:
-                        print(f"🌐 Descargando imagen desde URL: {infografia_existente['imagen_url']}")
-                        imagen_base64 = await _download_image(infografia_existente['imagen_url'])
+                        print(f"🌐 Descargando imagen desde URL: {imagen_url_db}")
+                        imagen_base64 = await _download_image(imagen_url_db)
                         if imagen_base64:
                             print(f"✅ Imagen descargada: {len(imagen_base64)} chars")
                     except Exception as e:
                         print(f"⚠️ Error descargando imagen: {e}")
                         imagen_base64 = None
-                
+
                 if imagen_base64:
-                    # Retornar EXACTAMENTE igual que antes
                     return JSONResponse({
                         "infografia": imagen_base64,
-                        "titulo": infografia_existente.get('titulo', ''),
+                        "titulo": infografia_existente.get("titulo", "") or "",
                         "guion_id": guion_id,
                         "unidad_nombre": metadata.get("unidad_nombre", "Sin nombre"),
                         "profesor": metadata.get("profesor", "Docente no especificado"),
@@ -5536,15 +5503,15 @@ async def generar_infografia(
                         "nombre_unidad": metadata.get("nombre_unidad", "Unidad no especificada")
                     })
                 else:
-                    print("⚠️ Infografía en BD pero no se pudo obtener imagen")
-        
-        # 3. Si no existe o se quiere regenerar, obtener información del guión
+                    print("⚠️ Infografía en BD pero no se pudo obtener imagen (seguirá regeneración)")
+
+        # Si no existe o se quiere regenerar
         print(f"🔍 Obteniendo información del guión {guion_id}")
         cursor.execute("""
-            SELECT 
+            SELECT
                 g.titulo,
                 g.ra AS recursos_aprendizaje,
-                g.contenido AS contenidos, 
+                g.contenido AS contenidos,
                 g.vector_id,
                 g.assistant_id,
                 u.nombre AS unidad_nombre,
@@ -5561,51 +5528,53 @@ async def generar_infografia(
             AND usr.tipo = 2
             LIMIT 1
         """, (guion_id,))
+
         result = cursor.fetchone()
-        
         if not result:
             raise HTTPException(status_code=404, detail="Guion no encontrado")
-            
-        # Guardar result para usarlo después
+
         result_data = {
-            'titulo': result['titulo'],
-            'recursos_aprendizaje': result['recursos_aprendizaje'],
-            'contenidos': result['contenidos'],
-            'vector_id': result['vector_id'],
-            'assistant_id': result['assistant_id'],
-            'unidad_nombre': result['unidad_nombre'],
-            'profesor': result['profesor'],
-            'nombre_curso': result['nombre_curso'],
-            'identificacion_clase': result['identificacion_clase']
+            "titulo": result.get("titulo", ""),
+            "recursos_aprendizaje": result.get("recursos_aprendizaje", ""),
+            "contenidos": result.get("contenidos", ""),
+            "vector_id": result.get("vector_id"),
+            "assistant_id": result.get("assistant_id"),
+            "unidad_nombre": result.get("unidad_nombre"),
+            "profesor": result.get("profesor"),
+            "nombre_curso": result.get("nombre_curso"),
+            "identificacion_clase": result.get("identificacion_clase"),
         }
-            
+
     except Exception as db_error:
         print(f"❌ Error en base de datos: {db_error}")
         raise HTTPException(status_code=500, detail=f"Error accediendo a datos: {str(db_error)}")
     finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
 
+    # -------------------- 2) Generación con reintentos internos --------------------
     try:
-        # ✅ Verificar recursos
         recursos_ok, mensaje_recursos = await verificar_recursos_antes_de_procesar(
-            result_data['vector_id'], 
-            result_data['assistant_id']
+            result_data["vector_id"],
+            result_data["assistant_id"]
         )
         if not recursos_ok:
             raise HTTPException(status_code=400, detail=mensaje_recursos)
 
-        # ✅ Throttling global
         await throttling_global()
-        
-        # ✅ Crear thread
+
         nuevo_thread = client.beta.threads.create()
         thread_id = nuevo_thread.id
         print(f"🆕 Thread creado: {thread_id}")
 
-        # ✅ Llamar al endpoint de infografía
         data = {
             "thread_id": thread_id,
             "vector_id": result_data["vector_id"],
@@ -5625,54 +5594,45 @@ async def generar_infografia(
                 titulo=payload["titulo"],
             )
 
-        data_response = await llamar_fn_con_reintentos_y_cancelacion(
-            call_fn,
-            data,
-            max_intentos=2,
-            tipo_contenido="infografia",
-            timeout_total=350,  # 👈 mismo timeout largo
-        )
+        # OJO: tu helper actual NO soporta timeout_total real (lo pisa).
+        # Igual lo llamamos con tipo_contenido="infografia" y abajo te dejo cómo arreglar el helper.
+        data_response = await llamar_fn_con_reintentos_infografia(
+    call_fn,
+    data,
+    max_intentos=2,
+    timeout_total=350
+)
 
-        
+
         if not data_response or not data_response.get("imagen_base64"):
             error_msg = data_response.get("error") if data_response else "Error desconocido"
-            raise HTTPException(
-                status_code=500, 
-                detail=f"No se pudo generar la infografía: {error_msg}"
-            )
-        
-        # Ahora data_response tiene ambos: imagen_base64 e imagen_url
+            raise HTTPException(status_code=500, detail=f"No se pudo generar la infografía: {error_msg}")
+
         imagen_base64 = data_response["imagen_base64"]
         imagen_url = data_response.get("imagen_url", "")
-        
+
         print(f"✅ Infografía generada - Base64: {len(imagen_base64)} chars, URL: {imagen_url[:50] if imagen_url else 'N/A'}...")
-        
-        # Extraer nombre_asignatura
-        nombre_asignatura = "Asignatura no especificada"
-        if result_data.get('identificacion_clase'):
-            try:
-                identificacion_data = json.loads(result_data['identificacion_clase'])
-                nombre_asignatura = identificacion_data.get('nombre_asignatura', result_data.get('nombre_curso', 'Asignatura no especificada'))
-            except:
-                nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        else:
-            nombre_asignatura = result_data.get('nombre_curso', 'Asignatura no especificada')
-        
-        # GUARDAR EN LA BASE DE DATOS
+
+        # -------------------- 2.1) Nombre asignatura robusto --------------------
+        identificacion_data = parse_json_field(result_data.get("identificacion_clase"), {})
+        nombre_asignatura = identificacion_data.get(
+            "nombre_asignatura",
+            result_data.get("nombre_curso", "Asignatura no especificada")
+        )
+
+        # -------------------- 3) Guardar en BD --------------------
         conn = connect_db()
         cursor = conn.cursor()
-        
-        # Obtener número de versión
+
         cursor.execute("""
             SELECT COALESCE(MAX(version), 0) + 1 as nueva_version
-            FROM infografia 
+            FROM infografia
             WHERE id_guion_clase = %s
         """, (guion_id,))
-        
+
         version_result = cursor.fetchone()
-        nueva_version = version_result[0] if version_result else 1
-        
-        # Preparar metadata para guardar
+        nueva_version = version_result.get("nueva_version") if version_result else 1
+
         metadata = {
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
             "profesor": result_data.get("profesor", "Docente no especificado"),
@@ -5682,30 +5642,23 @@ async def generar_infografia(
             "vector_id": result_data.get("vector_id"),
             "assistant_id": result_data.get("assistant_id"),
             "titulo_guion": result_data.get("titulo", ""),
-            "tamano_imagen": len(imagen_base64) if imagen_base64 else 0
+            "tamano_imagen": len(imagen_base64) if imagen_base64 else 0,
+            "imagen_url": imagen_url
         }
-        
-        # Guardar ambos, pero el base64 solo una parte (opcional)
-        # Para MySQL, es mejor no guardar todo el base64
+
+        # Guardar base64 solo si es pequeño (tu política)
         base64_a_guardar = ""
-        if len(imagen_base64) < 10000:  # Solo si es pequeña
+        if isinstance(imagen_base64, str) and len(imagen_base64) < 10000:
             base64_a_guardar = imagen_base64
         else:
-            # Guardar solo referencia
             base64_a_guardar = f"[Imagen base64 truncada - tamaño original: {len(imagen_base64)} chars]"
-        
-        # Insertar nueva infografía
-        # BORRAR INGRAFÍAS ANTERIORES DEL MISMO GUION
-        cursor.execute("""
-            DELETE FROM infografia 
-            WHERE id_guion_clase = %s
-        """, (guion_id,))
 
-        # Insertar nueva infografía (SIEMPRE con version = 1)
+        cursor.execute("DELETE FROM infografia WHERE id_guion_clase = %s", (guion_id,))
+
         cursor.execute("""
             INSERT INTO infografia (
-                id_guion_clase, 
-                titulo, 
+                id_guion_clase,
+                titulo,
                 imagen_url,
                 imagen_base64,
                 prompt_utilizado,
@@ -5718,19 +5671,15 @@ async def generar_infografia(
             imagen_url,
             base64_a_guardar,
             "Prompt generado automáticamente",
-            json.dumps(metadata)
+            json.dumps(metadata, ensure_ascii=False)
         ))
-        
+
         conn.commit()
-        cursor.close()
-        conn.close()
-        
         print(f"✅ Infografía guardada en BD (v{nueva_version})")
-        
-        # RETORNAR EXACTAMENTE IGUAL (con la imagen en base64 completa)
+
         return JSONResponse({
             "infografia": imagen_base64,
-            "titulo": result_data['titulo'],
+            "titulo": result_data.get("titulo", ""),
             "guion_id": guion_id,
             "unidad_nombre": result_data.get("unidad_nombre", "Sin nombre"),
             "profesor": result_data.get("profesor", "Docente no especificado"),
@@ -5747,16 +5696,25 @@ async def generar_infografia(
     except Exception as e:
         print(f"❌ Error en generación de infografía: {e}")
         raise HTTPException(status_code=500, detail=f"Error generando infografía: {str(e)}")
-        
+
     finally:
-        # ✅ Limpiar thread
+        try:
+            if cursor:
+                cursor.close()
+        except:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except:
+            pass
+
         if thread_id:
             try:
                 client.beta.threads.delete(thread_id)
                 print(f"🧹 Thread {thread_id} eliminado")
             except Exception as e:
                 print(f"⚠️ No se pudo eliminar thread: {e}")
-
 
 @app.post("/planificacion/{guion_id}/infografia/regenerar")
 async def regenerar_infografia(guion_id: int):
@@ -5832,71 +5790,72 @@ async def _download_image(image_url: str) -> Optional[str]:
         print(f"❌ Error descargando: {e}")
         return None
 
-async def llamar_api_con_reintentos_y_cancelacion_mejorado(
-    url, data, max_intentos=3, tipo_contenido="infografia", timeout_total=350
+async def llamar_fn_con_reintentos_infografia(
+    call_fn,
+    data,
+    max_intentos=2,
+    timeout_total=350
 ):
-    """Versión mejorada con cancelación de procesos pendientes"""
-    
+    """
+    Versión especial para infografía (sin HTTP).
+    - Timeout largo
+    - Validación por imagen_base64 / compat infografia
+    - Espera más larga tras timeout para no duplicar procesos pesados
+    """
+
     for intento in range(1, max_intentos + 1):
-        print(f"🔄 Intento {intento} de {max_intentos} para {tipo_contenido}")
-        
+        print(f"🔄 Intento {intento} de {max_intentos} para infografia")
+
         try:
-            # ✅ Configurar timeout específico por tipo de contenido
-            if tipo_contenido == "infografia":
-                timeout = timeout_total  # 350 segundos para infografías
-            else:
-                timeout = 120.0
-            
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(url, data=data)
-                
-            if response.status_code == 200:
-                data_response = response.json()
-                
-                # ✅ VERIFICACIÓN MEJORADA
-                if data_response.get("imagen_base64"):
-                    print(f"✅ {tipo_contenido} generado exitosamente (Intento {intento})")
-                    return data_response
-                elif data_response.get("infografia"):  # ✅ Manejo temporal para compatibilidad
-                    print("⚠️ Usando campo 'infografia' (debería ser 'imagen_base64')")
-                    data_response["imagen_base64"] = data_response["infografia"]
-                    return data_response
-                elif data_response.get("error"):
-                    print(f"❌ Error en API: {data_response['error']}")
-                    if intento == max_intentos:
-                        return {"error": data_response['error']}
-                else:
-                    print(f"🚫 Respuesta sin contenido válido: {data_response.keys()}")
-                    if intento == max_intentos:
-                        return {"error": "Respuesta sin contenido válido"}
-            else:
-                print(f"❌ Error HTTP {response.status_code}: {response.text}")
+            # ✅ Llamada interna con timeout largo
+            data_response = await asyncio.wait_for(call_fn(data), timeout=timeout_total)
+
+            if not isinstance(data_response, dict):
+                print("🚫 Respuesta inválida (no dict)")
                 if intento == max_intentos:
-                    return {"error": f"Error HTTP {response.status_code}"}
-                    
-        except httpx.TimeoutException:
-            print(f"⏰ Timeout en intento {intento} para {tipo_contenido}")
-            
-            # ✅ NOTA: El proceso en la API podría seguir corriendo
-            # Pero al menos no hacemos otro intento inmediato que duplique procesos
+                    return {"error": "Respuesta inválida (no dict)"}
+                continue
+
+            # ✅ VERIFICACIÓN MEJORADA
+            if data_response.get("imagen_base64"):
+                print(f"✅ infografia generada exitosamente (Intento {intento})")
+                return data_response
+
+            # Compat: algunas versiones devuelven "infografia"
+            if data_response.get("infografia"):
+                print("⚠️ Usando campo 'infografia' (compat). Debería ser 'imagen_base64'")
+                data_response["imagen_base64"] = data_response["infografia"]
+                return data_response
+
+            if data_response.get("error"):
+                print(f"❌ Error en generación interna: {data_response['error']}")
+                if intento == max_intentos:
+                    return {"error": data_response["error"]}
+            else:
+                print(f"🚫 Respuesta sin contenido válido: {list(data_response.keys())}")
+                if intento == max_intentos:
+                    return {"error": "Respuesta sin contenido válido"}
+
+        except asyncio.TimeoutError:
+            print(f"⏰ Timeout en intento {intento} para infografia")
             if intento == max_intentos:
                 return {"error": f"Timeout después de {timeout_total} segundos"}
-            
-            # ✅ Esperar más tiempo antes de reintentar para dar chance al proceso anterior
-            wait_time = 10 * intento  # 10, 20, 30 segundos
+
+            # ✅ Espera más tiempo antes de reintentar
+            wait_time = 10 * intento  # 10, 20...
             print(f"⏳ Esperando {wait_time}s antes de reintentar...")
             await asyncio.sleep(wait_time)
-            
+
         except Exception as e:
             print(f"❌ Error en intento {intento}: {str(e)}")
             if intento == max_intentos:
                 return {"error": str(e)}
-        
+
         if intento < max_intentos:
-            wait_time = 5 * intento  # Backoff exponencial
+            wait_time = 5 * intento
             print(f"⏳ Esperando {wait_time}s antes del próximo intento...")
             await asyncio.sleep(wait_time)
-    
+
     return {"error": "Todos los intentos fallaron"}
 
 #################################################################
