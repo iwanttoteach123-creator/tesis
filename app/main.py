@@ -59,7 +59,7 @@ from googleapiclient.http import MediaIoBaseUpload
 from .gpt_api import *               # si lo usas aquí
 from .autenticacion import login
 from .services.google_drive_oauth import GoogleDriveOAuth
-from ..api import router as api_router
+from api import router as api_router
 
 # =========================
 # 3) App
