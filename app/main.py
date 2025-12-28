@@ -103,6 +103,7 @@ if not EMAIL_ENABLED:
 
 IS_LOCAL = os.getenv("IS_LOCAL", "1") == "1"
 
+url_api = os.getenv("URL_API", "http://127.0.0.1:8000").rstrip("/")
 # ⚠️ NO hardcodees credenciales en código: usa env siempre.
 # Si quieres mantenerlo por ahora, déjalo, pero esto NO es para producción.
 
