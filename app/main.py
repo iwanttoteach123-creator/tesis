@@ -81,6 +81,8 @@ class LoginBody(BaseModel):
     correo: str
     clave: str
 
+
+
 # =========================
 # 5) Config / envs (no crashear en import-time)
 # =========================
@@ -447,46 +449,43 @@ async def get_unidades_curso_profesor(curso_id: int):
         print(f"Error al obtener unidades del curso para profesor: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# Función para crear un nuevo curso con una unidad inicial
+from app.services.openai_assistants import create_assistant_fn, create_vector_fn
+
 @app.post("/curso")
 async def crear_curso(request: Request):
     data = await request.json()
     nombre_curso = data.get('nombre_curso')
     id_usuario = data.get('id_usuario')
-    #------ crear asistente y vector
+
+    if not nombre_curso:
+        raise HTTPException(status_code=400, detail="El nombre del curso es requerido")
+    if not id_usuario:
+        raise HTTPException(status_code=400, detail="El id_usuario es requerido")
+
+    #------ crear asistente y vector (SIN HTTP)
     nombre_asistente = f"{nombre_curso}_"
 
-    # Llamada a la API para crear un nuevo asistente
-    url = f"{url_api}/create-assistant/"
-    params = {"name": nombre_asistente}
-    response = requests.post(url, params=params)
-    if response.status_code == 200:
-        assistant_id = response.json()  # Obtener el assistant_id de la respuesta
-    if not nombre_curso:
-        raise HTTPException(status_code=400, detail="El nombre de la unidad es requerido")
-    
-     # Llamada a la API para crear el vector
-    url_create_vector = f"{url_api}/create-vector/{assistant_id}"
-    response_vector = requests.post(url_create_vector)
+    try:
+        assistant_id = await create_assistant_fn(nombre_asistente)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al crear assistant: {e}")
 
-    if response_vector.status_code == 200:
-        vector_id = response_vector.json()  # Obtener el vector_id de la respuesta
-    else:
-        raise HTTPException(status_code=500, detail="Error al crear el vector")
+    try:
+        vector_id = await create_vector_fn(assistant_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al crear vector: {e}")
     #------
 
     try:
         conn = connect_db()
         cursor = conn.cursor()
 
-        # Insertar el nuevo curso
         cursor.execute(
             "INSERT INTO curso (nombre) VALUES (%s) RETURNING id",
             (nombre_curso,)
         )
         curso_id = cursor.fetchone()["id"]
 
-        # Insertar la unidad asociada al curso (Unidad 1)
         cursor.execute(
             """
             INSERT INTO unidad (nombre, id_curso, assistant_id, vector_id)
@@ -495,7 +494,6 @@ async def crear_curso(request: Request):
             ('Unidad 1', curso_id, assistant_id, vector_id)
         )
 
-        # Insertar la asociación usuario_curso
         cursor.execute(
             """
             INSERT INTO usuario_curso (id_usuario, id_curso)
@@ -516,7 +514,6 @@ async def crear_curso(request: Request):
             conn.close()
         except:
             pass
-
 
 
 # Nueva ruta para actualizar el nombre del curso
@@ -589,45 +586,49 @@ async def get_actividades_por_unidad(unidad_id: int):
     except Exception as e:
         print(f"Error al obtener actividades por unidad: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+from app.services.openai_assistants import delete_assistant_fn, delete_vector_fn
 
+# Ruta para eliminar un curso
 # Ruta para eliminar un curso
 @app.delete("/curso/{curso_id}")
 async def eliminar_curso(curso_id: int):
+    conn = None
+    cursor = None
+
     try:
         conn = connect_db()
         cursor = conn.cursor()
 
         # Obtener todas las unidades vinculadas a este curso
-        cursor.execute("SELECT id, assistant_id, vector_id FROM unidad WHERE id_curso = %s", (curso_id,))
+        cursor.execute(
+            "SELECT id, assistant_id, vector_id FROM unidad WHERE id_curso = %s",
+            (curso_id,)
+        )
         unidades = cursor.fetchall()
 
         # Recorre todas las unidades vinculadas para eliminar sus asistentes y vectores
         for unidad in unidades:
-            unidad_id, assistant_id, vector_id = unidad
+            # soporta cursor que devuelve tuplas o dicts
+            if isinstance(unidad, dict):
+                unidad_id = unidad.get("id")
+                assistant_id = unidad.get("assistant_id")
+                vector_id = unidad.get("vector_id")
+            else:
+                unidad_id, assistant_id, vector_id = unidad
 
-            # Eliminar el asistente asociado
+            # Eliminar el asistente asociado (SIN HTTP)
             if assistant_id:
                 try:
-                    # Llamada HTTP para eliminar el asistente en la API en el puerto 8001
-                    assistant_delete_url = f"{url_api}/delete-assistant/{assistant_id}"
-                    response = requests.delete(assistant_delete_url)
-                    if response.status_code == 200:
-                        print(f"Asistente {assistant_id} eliminado correctamente")
-                    else:
-                        print(f"Error al eliminar el asistente {assistant_id}: {response.status_code}, {response.text}")
+                    await delete_assistant_fn(assistant_id)
+                    print(f"Asistente {assistant_id} eliminado correctamente")
                 except Exception as e:
                     print(f"Error al eliminar el asistente {assistant_id}: {e}")
 
-            # Eliminar el vector asociado
+            # Eliminar el vector asociado (SIN HTTP)
             if vector_id:
                 try:
-                    # Llamada HTTP para eliminar el vector en la API en el puerto 8001
-                    vector_delete_url = f"{url_api}/delete-vector/{vector_id}/"
-                    response = requests.delete(vector_delete_url)
-                    if response.status_code == 200:
-                        print(f"Vector {vector_id} eliminado correctamente")
-                    else:
-                        print(f"Error al eliminar el vector {vector_id}: {response.status_code}, {response.text}")
+                    await delete_vector_fn(vector_id)
+                    print(f"Vector {vector_id} eliminado correctamente")
                 except Exception as e:
                     print(f"Error al eliminar el vector {vector_id}: {e}")
 
@@ -638,41 +639,50 @@ async def eliminar_curso(curso_id: int):
         cursor.execute("DELETE FROM curso WHERE id = %s", (curso_id,))
 
         conn.commit()
-        cursor.close()
-        conn.close()
-
-        return JSONResponse(status_code=200, content={"message": "Curso y sus datos vinculados eliminados correctamente"})
+        return JSONResponse(
+            status_code=200,
+            content={"message": "Curso y sus datos vinculados eliminados correctamente"}
+        )
 
     except Exception as e:
+        if conn:
+            conn.rollback()
         print(f"Error al eliminar el curso: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-    
-@app.post("/curso/{curso_id}/unidad")    
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+        except:
+            pass
+
+from app.services.openai_assistants import create_assistant_fn, create_vector_fn
+
+@app.post("/curso/{curso_id}/unidad")
 async def crear_unidad(curso_id: int, request: Request):
     data = await request.json()
-    nombre_unidad = data.get('nombre_unidad')
-    
+    nombre_unidad = data.get("nombre_unidad")
+
+    if not nombre_unidad:
+        raise HTTPException(status_code=400, detail="El nombre de la unidad es requerido")
+
     # NO LA CAGUES CLAUDIO AROS
     nombre_asistente = f"{nombre_unidad}_"
 
-    # Llamada a la API para crear un nuevo asistente
-    url = f"{url_api}/create-assistant/"
-    params = {"name": nombre_asistente}
-    response = requests.post(url, params=params)
-    if response.status_code == 200:
-        assistant_id = response.json()  # Obtener el assistant_id de la respuesta
-    if not nombre_unidad:
-        raise HTTPException(status_code=400, detail="El nombre de la unidad es requerido")
-    
-    # Llamada a la API para crear el vector
-    url_create_vector = f"{url_api}/create-vector/{assistant_id}"
-    response_vector = requests.post(url_create_vector)
+    # ------ crear asistente y vector (SIN HTTP)
+    try:
+        assistant_id = await create_assistant_fn(nombre_asistente)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creando assistant: {e}")
 
-    if response_vector.status_code == 200:
-        vector_id = response_vector.json()
-    else:
-        raise HTTPException(status_code=500, detail="Error al crear el vector")
+    try:
+        vector_id = await create_vector_fn(assistant_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creando vector: {e}")
+    # ------
 
     try:
         conn = connect_db()
@@ -692,7 +702,12 @@ async def crear_unidad(curso_id: int, request: Request):
         conn.commit()
         return JSONResponse(
             status_code=201,
-            content={"message": "Unidad creada exitosamente", "unidad_id": unidad_id}
+            content={
+                "message": "Unidad creada exitosamente",
+                "unidad_id": unidad_id,
+                "assistant_id": assistant_id,
+                "vector_id": vector_id,
+            }
         )
 
     finally:
@@ -701,7 +716,6 @@ async def crear_unidad(curso_id: int, request: Request):
             conn.close()
         except:
             pass
-
 
 
 # Ruta para actualizar el nombre de una unidad
@@ -757,58 +771,73 @@ async def actualizar_nombre_unidad(unidad_id: int, request: Request):
         raise HTTPException(status_code=500, detail="Error interno del servidor")
     
 
+from app.services.openai_assistants import delete_assistant_fn, delete_vector_fn
+
 @app.delete("/unidad/{unidad_id}")
 async def eliminar_unidad(unidad_id: int):
+    conn = None
+    cursor = None
+
     try:
         conn = connect_db()
         cursor = conn.cursor()
 
-        # Obtener el assistant_id y el vector_id vinculados a la unidad antes de eliminarla
-        cursor.execute("SELECT assistant_id, vector_id FROM unidad WHERE id = %s", (unidad_id,))
+        # Obtener assistant_id y vector_id
+        cursor.execute(
+            "SELECT assistant_id, vector_id FROM unidad WHERE id = %s",
+            (unidad_id,)
+        )
         result = cursor.fetchone()
-        if result:
-            assistant_id, vector_id = result
-        else:
+
+        if not result:
             return JSONResponse(status_code=404, content={"message": "Unidad no encontrada"})
 
-        # Eliminar el asistente vinculado si existe
+        # soporta dict o tupla
+        if isinstance(result, dict):
+            assistant_id = result.get("assistant_id")
+            vector_id = result.get("vector_id")
+        else:
+            assistant_id, vector_id = result
+
+        # Eliminar el asistente (SIN HTTP)
         if assistant_id:
             try:
-                # Llamada HTTP para eliminar el asistente usando la API en el puerto 8001
-                assistant_delete_url = f"{url_api}/delete-assistant/{assistant_id}"
-                response = requests.delete(assistant_delete_url)
-                if response.status_code == 200:
-                    print(f"Asistente {assistant_id} eliminado correctamente")
-                else:
-                    print(f"Error al eliminar el asistente {assistant_id}: {response.status_code}, {response.text}")
+                await delete_assistant_fn(assistant_id)
+                print(f"Asistente {assistant_id} eliminado correctamente")
             except Exception as e:
                 print(f"Error al eliminar el asistente {assistant_id}: {e}")
 
-        # Eliminar el vector vinculado si existe
+        # Eliminar el vector (SIN HTTP)
         if vector_id:
             try:
-                # Llamada HTTP para eliminar el vector usando la API en el puerto 8001
-                vector_delete_url = f"{url_api}/delete-vector/{vector_id}/"
-                response = requests.delete(vector_delete_url)
-                if response.status_code == 200:
-                    print(f"Vector {vector_id} eliminado correctamente")
-                else:
-                    print(f"Error al eliminar el vector {vector_id}: {response.status_code}, {response.text}")
+                await delete_vector_fn(vector_id)
+                print(f"Vector {vector_id} eliminado correctamente")
             except Exception as e:
                 print(f"Error al eliminar el vector {vector_id}: {e}")
 
-        # Eliminar la unidad y sus actividades asociadas (en cascada)
+        # Eliminar la unidad (y cascada si aplica)
         cursor.execute("DELETE FROM unidad WHERE id = %s", (unidad_id,))
-
         conn.commit()
-        cursor.close()
-        conn.close()
 
-        return JSONResponse(status_code=200, content={"message": "Unidad, actividades, asistente, y vector eliminados correctamente"})
+        return JSONResponse(
+            status_code=200,
+            content={"message": "Unidad, actividades, asistente, y vector eliminados correctamente"}
+        )
 
     except Exception as e:
+        if conn:
+            conn.rollback()
         print(f"Error al eliminar la unidad y actividades asociadas: {e}")
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+        except:
+            pass
 
 # Ruta para crear una nueva actividad en una unidad específica
 # Ruta para crear una nueva actividad en una unidad específica con un archivo PDF
@@ -3200,6 +3229,7 @@ async def procesar_pdf(archivo: UploadFile):
 
     return texto
 
+from app.services.openai_assistants import crear_guion_fn
 
 
 @app.post("/unidad/{unidad_id}/crear-guion")
@@ -3305,36 +3335,28 @@ async def crear_guion(
 
     # -------------------- Enviar datos a GPT --------------------
     try:
-        url = f"{url_api}/crear_guion/{assistant_id}"
-        data = {
-            "titulo": titulo,
-            "resultado_aprendizaje": ra,
-            "contenido_tematico": contenido,
-            "tipo_clase": estilo,
-            "duracion": duracion_int,
-            "semana": semana_int,
-            "vector_id": vector_id
-        }
-        print("🤖 Enviando datos a la API de GPT...")
-        print(f"📤 URL: {url}")
-        
-        response = requests.post(url, data=data)
-        print(f"📥 Status Code: {response.status_code}")
-        
-        response.raise_for_status()
-        
-        print("✅ Llamada a GPT completada")
+        print("🤖 Enviando datos a GPT (SIN HTTP interno)...")
 
-    except requests.exceptions.RequestException as e:
+        data_response = await crear_guion_fn(
+            assistant_id=assistant_id,
+            titulo=titulo,
+            resultado_aprendizaje=ra,
+            contenido_tematico=contenido,
+            tipo_clase=estilo,
+            duracion=duracion_int,
+            semana=semana_int,
+            vector_id=vector_id,
+        )
+
+        print("✅ Llamada a GPT completada (sin HTTP)")
+
+    except Exception as e:
         print("❌ Error llamando a GPT:", e)
-        print(f"❌ Response text: {response.text if 'response' in locals() else 'No response'}")
         raise HTTPException(status_code=500, detail=f"Error al comunicarse con GPT: {e}")
 
-    # -------------------- Procesar respuesta de GPT --------------------
-    data_response = response.json()
     thread_id = data_response.get("thread_id")
-
     print(f"📦 thread_id recibido: {thread_id}")
+
 
     # -------------------- Guardar planificación (FORMATO DOCENTE) --------------------
     try:
@@ -3835,66 +3857,66 @@ async def cancelar_runs_activos_si_reintento(thread_id, intento_actual, max_inte
         except Exception as e:
             print(f"⚠️ Error cancelando runs: {e}")
 
-async def llamar_api_con_reintentos_y_cancelacion(url, data, max_intentos=3, tipo_contenido="glosario"):
+async def llamar_fn_con_reintentos_y_cancelacion(call_fn,
+    data,
+    max_intentos=3,
+    tipo_contenido="glosario",
+    timeout_total=None
+):
     """
-    Versión MEJORADA CON AIOHTTP para ser asíncrona
+    Igual que llamar_api_con_reintentos_y_cancelacion, pero llama una función interna (call_fn)
+    en vez de hacer POST por HTTP.
     """
-    import aiohttp
     thread_id = data.get("thread_id")
-    
+
+    timeout_por_tipo = {
+        "mapa_conceptual": 180,
+        "resumen": 60,
+        "flashcards": 45,
+        "glosario": 45,
+        "evaluacion_formativa": 60
+    }
+    timeout_total = timeout_por_tipo.get(tipo_contenido, 60)
+
     for intento in range(max_intentos):
         try:
             print(f"🔄 Intento {intento + 1} de {max_intentos} para {tipo_contenido}")
-            
+
             # ✅ Cancelar runs huérfanos en reintentos
             if intento > 0 and thread_id:
                 await cancelar_runs_activos_si_reintento(thread_id, intento, max_intentos)
-            
-            # ✅ USAR AIOHTTP EN LUGAR DE REQUESTS (para async)
-            timeout_por_tipo = {
-                "mapa_conceptual": 180,
-                "resumen": 60,
-                "flashcards": 45,
-                "glosario": 45,
-                "evaluacion_formativa": 60
-            }
 
-            
-            timeout = aiohttp.ClientTimeout(total=timeout_por_tipo.get(tipo_contenido, 60))
-            
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, data=data) as response:
-                    response.raise_for_status()
-                    data_response = await response.json()
-            
-            # Validación de contenido
+            # ✅ Llamada interna con timeout
+            timeout = timeout_total or timeout_por_tipo.get(tipo_contenido, 60)
+            data_response = await asyncio.wait_for(call_fn(data), timeout=timeout)
+
+            # ✅ Validación de contenido (igual que antes)
             contenido_texto = obtener_contenido_por_tipo(data_response, tipo_contenido)
             es_valido, mensaje = validar_contenido_segun_tipo(contenido_texto, tipo_contenido)
-            
+
             if es_valido:
                 print(f"✅ {mensaje} (intento {intento + 1})")
                 return data_response
             else:
                 print(f"🚫 Contenido rechazado: {mensaje} (intento {intento + 1})")
                 continue
-                
+
         except asyncio.TimeoutError:
             print(f"⏰ Timeout en intento {intento + 1}")
             continue
-            
+
         except Exception as e:
             print(f"❌ Error en intento {intento + 1}: {e}")
             continue
-        
-        # Backoff exponencial entre intentos
+
+        # Backoff exponencial entre intentos (igual)
         if intento < max_intentos - 1:
             tiempo_espera = 2 ** intento
             print(f"⏳ Esperando {tiempo_espera}s antes del próximo intento...")
             await asyncio.sleep(tiempo_espera)
-    
+
     print(f"💀 Todos los intentos fallaron para {tipo_contenido}")
     return None
-
 
 def obtener_contenido_por_tipo(data_response, tipo_contenido):
     """
@@ -3918,6 +3940,7 @@ def obtener_contenido_por_tipo(data_response, tipo_contenido):
 #########################################################################
 #########################################################################
 #########################################################################
+from app.services.openai_assistants import generar_resumen_fn
 
 
 #########################################################################
@@ -4015,7 +4038,25 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
             'nombre_curso': result['nombre_curso'],
             'identificacion_clase': result['identificacion_clase']
         }
-            
+        data = {
+            "thread_id": thread_id,
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+        }
+
+        async def call_fn(payload):
+            return await generar_resumen_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+            )
+
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=3,
+            tipo_contenido="resumen"
+        )    
     finally:
         if cursor:
             cursor.close()
@@ -4031,17 +4072,14 @@ async def generar_resumen(guion_id: int, accion: str = Query("obtener")):
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado: {thread_id}")
         
-        url = f"{url_api}/generar_resumen/{result_data['assistant_id']}"
-        data = {
-            "thread_id": thread_id,
-            "vector_id": result_data['vector_id']
-        }
         
-        # ✅ Llamar a la API
-        data_response = await llamar_api_con_reintentos_y_cancelacion(
-            url, data, max_intentos=3, tipo_contenido="resumen"
+        data_response = await generar_resumen_fn(
+            assistant_id=result_data["assistant_id"],
+            thread_id=thread_id,
+            vector_id=result_data["vector_id"],
         )
-        
+
+                
         # ✅ Procesar respuesta
         if data_response:
             resumen_texto = data_response.get("resumen", "")
@@ -4539,7 +4577,27 @@ async def generar_mapa_conceptual(
             'nombre_curso': result['nombre_curso'],
             'identificacion_clase': result['identificacion_clase']
         }
-            
+        data = {
+            "thread_id": thread_id,
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+            "titulo_guion": result_data["titulo"],
+        }    
+        async def call_fn(payload):
+            return await generar_mapa_conceptual_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+                titulo_guion=payload["titulo_guion"],
+            )
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=3,
+            tipo_contenido="mapa_conceptual"
+        )
+
+
     except Exception as db_error:
         print(f"❌ Error en base de datos: {db_error}")
         raise HTTPException(status_code=500, detail=f"Error accediendo a datos: {str(db_error)}")
@@ -4559,17 +4617,16 @@ async def generar_mapa_conceptual(
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para mapa: {thread_id}")
         
-        url = f"{url_api}/generar_mapa_conceptual/{result_data['assistant_id']}"
-        data = {
-            "thread_id": thread_id,
-            "vector_id": result_data['vector_id'],
-            "titulo_guion": result_data['titulo']
-        }
-        
-        # ✅ Llamar a la API
-        data_response = await llamar_api_con_reintentos_y_cancelacion(
-            url, data, max_intentos=3, tipo_contenido="mapa_conceptual"
+        from app.services.openai_assistants import generar_mapa_conceptual_fn
+
+        data_response = await generar_mapa_conceptual_fn(
+            assistant_id=result_data["assistant_id"],
+            thread_id=thread_id,
+            vector_id=result_data["vector_id"],
+            titulo_guion=result_data["titulo"],
         )
+
+        
         
         if not data_response:
             raise HTTPException(
@@ -4714,7 +4771,7 @@ async def verificar_mapa_conceptual_existe(guion_id: int):
 #################################################################
 #################################################################
 
-
+from app.services.openai_assistants import generar_flashcards_fn
 #########################################################################
 ##################
 ################## Funcion para obtener flashcards
@@ -4834,14 +4891,26 @@ async def generar_flashcards(
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para flashcards: {thread_id}")
         
-        url = f"{url_api}/generar_flashcards/{result_data['assistant_id']}"
-        data = {"thread_id": thread_id, "vector_id": result_data['vector_id']}
-        
-        # ✅ Llamar a la API
-        data_response = await llamar_api_con_reintentos_y_cancelacion(
-            url, data, max_intentos=3, tipo_contenido="flashcards"
+        data = {
+            "thread_id": thread_id,
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+        }
+
+        async def call_fn(payload):
+            return await generar_flashcards_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+            )
+
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=3,
+            tipo_contenido="flashcards"
         )
-        
+                
         # ✅ MANTENER: Tu lógica de procesamiento actual
         if data_response:
             flashcards_texto = data_response.get("flashcards", "")
@@ -5024,7 +5093,7 @@ async def verificar_flashcards_existe(guion_id: int):
 #################################################################
 #################################################################
 #################################################################
-
+from app.services.openai_assistants import generar_glosario_fn
 #########################################################################
 ##################
 ################## Funcion para obtener glosario
@@ -5144,13 +5213,28 @@ async def generar_glosario(
         thread_id = nuevo_thread.id
         print(f"🆕 Nuevo thread creado para glosario: {thread_id}")
         
-        url = f"{url_api}/generar_glosario/{result_data['assistant_id']}"
-        data = {"thread_id": thread_id, "vector_id": result_data['vector_id']}
-        
-        # ✅ Llamar a la API
-        data_response = await llamar_api_con_reintentos_y_cancelacion(
-            url, data, max_intentos=3, tipo_contenido="glosario"
+
+
+        data = {
+            "thread_id": thread_id,
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+        }
+
+        async def call_fn(payload):
+            return await generar_glosario_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+            )
+
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=3,
+            tipo_contenido="glosario"
         )
+
         
         # ✅ MANTENER: Tu lógica de procesamiento actual
         if data_response:
@@ -5337,7 +5421,7 @@ async def verificar_glosario_existe(guion_id: int):
 #################################################################
 #################################################################
 #################################################################
-
+from app.services.openai_assistants import generar_infografia_fn
 #########################################################################
 ##################
 ################## Funcion para obtener infografia
@@ -5479,19 +5563,33 @@ async def generar_infografia(
         print(f"🆕 Thread creado: {thread_id}")
 
         # ✅ Llamar al endpoint de infografía
-        url = f"{url_api}/generar_infografia/{result_data['assistant_id']}"
         data = {
             "thread_id": thread_id,
-            "vector_id": result_data['vector_id'],
-            "recursos_aprendizaje": result_data['recursos_aprendizaje'],
-            "contenidos": result_data['contenidos'],
-            "titulo": result_data['titulo']
+            "vector_id": result_data["vector_id"],
+            "assistant_id": result_data["assistant_id"],
+            "recursos_aprendizaje": result_data["recursos_aprendizaje"],
+            "contenidos": result_data["contenidos"],
+            "titulo": result_data["titulo"],
         }
-        
-        # ✅ Timeout más largo para infografías (350 segundos)
-        data_response = await llamar_api_con_reintentos_y_cancelacion_mejorado(
-            url, data, max_intentos=2, tipo_contenido="infografia", timeout_total=350
+
+        async def call_fn(payload):
+            return await generar_infografia_fn(
+                assistant_id=payload["assistant_id"],
+                thread_id=payload["thread_id"],
+                vector_id=payload["vector_id"],
+                recursos_aprendizaje=payload["recursos_aprendizaje"],
+                contenidos=payload["contenidos"],
+                titulo=payload["titulo"],
+            )
+
+        data_response = await llamar_fn_con_reintentos_y_cancelacion(
+            call_fn,
+            data,
+            max_intentos=2,
+            tipo_contenido="infografia",
+            timeout_total=350,  # 👈 mismo timeout largo
         )
+
         
         if not data_response or not data_response.get("imagen_base64"):
             error_msg = data_response.get("error") if data_response else "Error desconocido"
