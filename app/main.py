@@ -4,7 +4,7 @@
 from pathlib import Path
 from dotenv import load_dotenv
 import resend  # pip install resend
-
+import os
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_FROM = os.getenv("EMAIL_FROM", "onboarding@resend.dev")
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"   # -> backend/.env
@@ -13,7 +13,7 @@ load_dotenv(ENV_PATH)
 # =========================
 # 1) Imports estándar / terceros
 # =========================
-import os
+
 import io
 import re
 import json
@@ -302,7 +302,7 @@ async def get_user_id(request: Request):
     return int(user_id)
 
 # Modifica tu login para que devuelva un token
-import os
+
 from fastapi.responses import JSONResponse
 
 @app.post("/login")
